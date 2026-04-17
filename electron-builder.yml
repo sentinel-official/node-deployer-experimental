@@ -1,0 +1,78 @@
+appId: com.sentinel.dvpn.app
+productName: Sentinel dVPN
+
+# Auto-updater publish channel. Pushing a tag + uploading artifacts to a
+# GitHub release at `sentinel-official/sentinel-dvpn-app` is all
+# electron-updater needs to discover upgrades.
+publish:
+  - provider: github
+    owner: sentinel-official
+    repo: sentinel-dvpn-app
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**/*
+  - package.json
+
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - '**/*'
+
+# No signing for now (user decision). macOS hardenedRuntime is off so that
+# unsigned builds launch from Gatekeeper without a manual entitlement flow.
+mac:
+  icon: build/icon.icns
+  category: public.app-category.utilities
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
+
+dmg:
+  writeUpdateInfo: false
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  verifyUpdateCodeSignature: false
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Sentinel dVPN
+
+linux:
+  icon: build/icon.png
+  category: Network
+  maintainer: Sentinel dVPN <noreply@sentinel.co>
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+
+asar: true
+asarUnpack:
+  # Native bindings must sit on disk to be loadable.
+  - '**/*.node'
+  - node_modules/better-sqlite3/**/*
+  - node_modules/cpu-features/**/*
+  - node_modules/ssh2/**/*
+  - node_modules/secp256k1/**/*

@@ -1,0 +1,123 @@
+/* Material Symbols — offline webfont shipped via the material-symbols package.
+   Only the outlined variant is used; rounded/sharp are ~5MB each and we
+   don't reference them. Must precede @tailwind. */
+@import 'material-symbols/outlined.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- base ---------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-bg text-text font-sans antialiased;
+  background-image:
+    radial-gradient(1200px 600px at 80% -10%, rgba(79, 124, 255, 0.08), transparent 60%),
+    radial-gradient(900px 400px at -10% 100%, rgba(46, 211, 126, 0.06), transparent 60%);
+}
+
+.drag-region {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* ---------- custom scrollbar ---------- */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #1e2a4e;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #26325a;
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ---------- reusable component classes ---------- */
+@layer components {
+  .card {
+    @apply rounded-2xl border border-border bg-bg-card shadow-card;
+  }
+  .card-elev {
+    @apply rounded-2xl border border-border-soft bg-bg-elev shadow-card;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-accent hover:bg-accent-strong text-white;
+  }
+  .btn-secondary {
+    @apply btn bg-bg-elev hover:bg-border text-text border border-border;
+  }
+  .btn-ghost {
+    @apply btn text-text-muted hover:text-text hover:bg-bg-elev;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border;
+  }
+  .chip-ok {
+    @apply chip bg-success/10 text-success border-success/30;
+  }
+  .chip-warn {
+    @apply chip bg-warning/10 text-warning border-warning/30;
+  }
+  .chip-err {
+    @apply chip bg-danger/10 text-danger border-danger/30;
+  }
+  .chip-muted {
+    @apply chip bg-bg-elev text-text-muted border-border;
+  }
+  .field-label {
+    @apply text-xs font-medium uppercase tracking-wider text-text-muted mb-1.5;
+  }
+  .field-input {
+    @apply w-full rounded-lg bg-bg-input border border-border px-3 py-2.5 text-sm text-text placeholder:text-text-dim focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/30;
+  }
+  .section-title {
+    @apply text-sm font-semibold text-text-muted uppercase tracking-wider;
+  }
+  .skeleton {
+    @apply animate-pulse bg-bg-elev/70 rounded-lg;
+  }
+}
+
+/* Progress ring spinner */
+@keyframes ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.ring-spin {
+  animation: ring-spin 1.6s linear infinite;
+}
+
+/* Toast enter/exit */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast {
+  animation: toast-in 180ms ease-out;
+}
