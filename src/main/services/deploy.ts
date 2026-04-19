@@ -268,8 +268,13 @@ async function runLocalDeploy(
   const keygen = await runOnce({
     hostDataDir: dataDir,
     imageTag: IMAGE_TAG,
+    // The image's ENTRYPOINT is `dvpnx`. Override it with /bin/sh so we
+    // can shell-pipe the mnemonic into `sentinelhub keys add --recover`.
+    // Without this override, Docker runs `dvpnx /bin/sh -c "..."` and
+    // dvpnx rejects `/bin/sh` as an unknown subcommand.
+    entrypoint: ['/bin/sh', '-c'],
     // sentinelhub's `--recover` reads the mnemonic from stdin on a single line.
-    cmd: ['/bin/sh', '-c', `echo '${nodeMnemonic}' | ${hubCmd.join(' ')}`],
+    cmd: [`echo '${nodeMnemonic}' | ${hubCmd.join(' ')}`],
     onLog: (line) => push('keygen', 62, 'Seeding node keyring', line),
   });
   if (keygen.exitCode !== 0) {
