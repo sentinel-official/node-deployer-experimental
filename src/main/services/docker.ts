@@ -92,7 +92,16 @@ let client: Docker | null = null;
 function candidateSockets(override: string): string[] {
   if (override) return [override];
   if (process.platform === 'win32') {
-    return ['//./pipe/docker_engine'];
+    // Docker Desktop on Windows exposes different named pipes depending on
+    // which context is active. `desktop-linux` (the default since 4.x) uses
+    // `dockerDesktopLinuxEngine`; the legacy `default` context uses
+    // `docker_engine`; Windows-containers mode uses `dockerDesktopWindowsEngine`.
+    // Probe all three so a freshly-installed Docker Desktop works out of the box.
+    return [
+      '//./pipe/dockerDesktopLinuxEngine',
+      '//./pipe/docker_engine',
+      '//./pipe/dockerDesktopWindowsEngine',
+    ];
   }
   return [
     '/var/run/docker.sock',
