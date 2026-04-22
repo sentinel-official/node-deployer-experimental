@@ -289,6 +289,15 @@ export async function runOnce(opts: {
   hostDataDir: string;
   imageTag: string;
   cmd: string[];
+  /**
+   * Override the image ENTRYPOINT for this invocation. The sentinel-dvpnx
+   * image sets `ENTRYPOINT ["dvpnx"]`, which is correct for `dvpnx init`
+   * but wrong when we need to invoke a sibling binary in the same image
+   * (e.g. `sentinelhub keys add --recover`) or a shell pipeline. Pass
+   * `entrypoint: ['']` to clear it, or `entrypoint: ['/bin/sh', '-c']`
+   * to replace it.
+   */
+  entrypoint?: string[];
   stdin?: string;
   onLog?: (line: string) => void;
 }): Promise<{ exitCode: number; output: string }> {
@@ -298,6 +307,9 @@ export async function runOnce(opts: {
   const container = await c.createContainer({
     Image: opts.imageTag,
     Cmd: opts.cmd,
+    // Only pass Entrypoint when the caller provides one — omitting the
+    // field leaves the image's ENTRYPOINT intact (what `dvpnx init` wants).
+    ...(opts.entrypoint ? { Entrypoint: opts.entrypoint } : {}),
     Tty: false,
     OpenStdin: Boolean(opts.stdin),
     StdinOnce: Boolean(opts.stdin),
