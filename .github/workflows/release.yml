@@ -41,6 +41,13 @@ jobs:
           node-version: 20
           cache: npm
 
+      # GitHub's default Python on runners is 3.12+, which removed
+      # `distutils` — node-gyp's bundled gyp still imports it, so pin to
+      # 3.11 to keep better-sqlite3's configure step working.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install npm deps
         run: npm ci
 
