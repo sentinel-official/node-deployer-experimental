@@ -43,7 +43,7 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.2",
+    "@electron/rebuild": "^4.0.4",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/adm-zip": "^0.5.8",
@@ -58,7 +58,7 @@
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
     "electron": "^39.8.5",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^2.3.0",
     "happy-dom": "^20.9.0",
     "postcss": "^8.4.49",
