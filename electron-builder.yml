@@ -2,12 +2,12 @@ appId: com.sentinel.dvpn.app
 productName: Sentinel dVPN
 
 # Auto-updater publish channel. Pushing a tag + uploading artifacts to a
-# GitHub release at `sentinel-official/sentinel-dvpn-app` is all
+# GitHub release at `sentinel-official/node-deployer-experimental` is all
 # electron-updater needs to discover upgrades.
 publish:
   - provider: github
     owner: sentinel-official
-    repo: sentinel-dvpn-app
+    repo: node-deployer-experimental
 directories:
   buildResources: build
   output: release

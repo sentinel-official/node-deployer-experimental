@@ -17,7 +17,7 @@ electron-updater · material-symbols**.
 ### Install
 
 Download the artifact for your OS from
-[GitHub Releases](https://github.com/sentinel-official/sentinel-dvpn-app/releases):
+[GitHub Releases](https://github.com/sentinel-official/node-deployer-experimental/releases):
 `.dmg` on macOS, `.exe` on Windows, `.AppImage` / `.deb` on Linux. Builds
 are currently unsigned, so macOS Gatekeeper will quarantine the first
 launch (right-click → Open) and Windows SmartScreen will ask you to allow
@@ -171,6 +171,27 @@ src/
 4. `npm run test:unit` — 25 tests across wallet crypto, chain constants,
    deploy parser, metrics, settings, and a component smoke
 5. `npm run build` — all three bundles
+
+### Releases
+
+`.github/workflows/release.yml` builds signed-ready installers for
+macOS, Windows, and Linux in parallel and uploads them as a GitHub
+Release. electron-updater reads the same release, so a tag push is also
+what ships the in-app update.
+
+To cut a release:
+
+1. Bump `version` in `package.json` and commit.
+2. Tag matching the new version: `git tag v0.2.0 && git push --tags`.
+3. The workflow builds `.dmg`/`.zip` (x64 + arm64), `.exe`/portable
+   (x64), and `.AppImage`/`.deb` (x64), then attaches them to a draft
+   release at
+   [node-deployer-experimental/releases](https://github.com/sentinel-official/node-deployer-experimental/releases).
+   Edit the draft's notes and publish.
+
+Manual `workflow_dispatch` runs the same pipeline as a dry-run — builds
+every OS bundle and uploads them as CI artifacts (14-day retention)
+without touching Releases.
 
 ### Known limitations
 
