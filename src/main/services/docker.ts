@@ -18,8 +18,7 @@ import { getSettings } from './settings';
  * First build takes 5–15 minutes on a fresh machine; subsequent deploys
  * reuse the cached image.
  */
-export const SENTINEL_DVPNX_DOCKERFILE = `# syntax=docker/dockerfile:1.6
-ARG DVPNX_REF=v8.3.1
+export const SENTINEL_DVPNX_DOCKERFILE = `ARG DVPNX_REF=v8.3.1
 ARG HUB_REF=v12.0.2
 
 # Go 1.24 is the version sentinel-dvpnx pins in go.mod. We pin explicitly
@@ -34,9 +33,7 @@ WORKDIR /src
 RUN apk add --no-cache --no-scripts autoconf automake bash file g++ gcc git libtool \\
     linux-headers make musl-dev unbound-dev && apk fix 2>/dev/null || true
 RUN git clone --branch=\${DVPNX_REF} --depth=1 https://github.com/sentinel-official/sentinel-dvpnx.git .
-RUN --mount=type=cache,target=/go/pkg/mod \\
-    --mount=type=cache,target=/root/.cache/go-build \\
-    make --jobs=$(nproc) install
+RUN make --jobs=$(nproc) install
 
 # ---------- sentinelhub build ----------------------------------------------
 FROM golang:1.24-alpine3.21 AS build-hub
@@ -50,9 +47,7 @@ RUN ARCH=$(uname -m) && \\
     echo "downloading libwasmvm_muslc.\${ARCH}.a @ \${WASM_VERSION}" && \\
     wget -q -O /usr/local/lib/libwasmvm_muslc.a \\
         "https://github.com/CosmWasm/wasmvm/releases/download/\${WASM_VERSION}/libwasmvm_muslc.\${ARCH}.a"
-RUN --mount=type=cache,target=/go/pkg/mod \\
-    --mount=type=cache,target=/root/.cache/go-build \\
-    STATIC=true make --jobs=$(nproc) build
+RUN STATIC=true make --jobs=$(nproc) build
 
 # ---------- runtime --------------------------------------------------------
 FROM alpine:3.21
@@ -184,7 +179,17 @@ export async function ensureImage(
         t: tag,
         dockerfile: 'Dockerfile',
         buildargs: { SENTINEL_DVPNX_VERSION: IMAGE_VERSION },
-      },
+        // Pin the daemon to the classic builder. On Docker Desktop 23+ the
+        // default `POST /build` endpoint is routed through BuildKit, which
+        // caches the OCI artifact in its own store without tagging the
+        // local image store — so the build "succeeds" but
+        // `docker.getImage(tag).inspect()` returns 404. BuildKit only
+        // writes to the image store when the caller negotiates a gRPC
+        // session with an `exporter=docker` output, which dockerode does
+        // not do. Forcing `version: 1` keeps us on the classic builder
+        // where tagging is implicit.
+        version: '1',
+      } as Docker.ImageBuildOptions & { version?: '1' | '2' },
     );
 
     await new Promise<void>((resolve, reject) => {
@@ -201,6 +206,21 @@ export async function ensureImage(
         },
       );
     });
+
+    // Belt-and-braces: even with `version: 1`, some Docker Desktop setups
+    // have `features.buildkit: true` in daemon.json which overrides the
+    // query param on older engines. If the image is still not in the
+    // local store after a "successful" build, fail loudly with an
+    // actionable message instead of letting the next step 404.
+    if (!(await hasImage(tag))) {
+      throw new Error(
+        `Build of ${tag} reported success but the image is not in the ` +
+          `local store. This usually means BuildKit silently cached the ` +
+          `artifact without tagging it. Try disabling BuildKit in Docker ` +
+          `Desktop Settings → Docker Engine (set "features.buildkit" to false ` +
+          `and restart), or run "docker buildx build --load" manually.`,
+      );
+    }
     onLog(`[docker] image ${tag} built`);
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
