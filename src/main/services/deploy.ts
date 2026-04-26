@@ -9,13 +9,15 @@ import {
   SENTINEL_DVPNX_DOCKERFILE,
   dockerHealth,
   ensureImage,
+  hasImage,
   runOnce,
 } from './docker';
 import { getSettings } from './settings';
 import { DENOM, DEFAULT_RPC_POOL } from './chain';
 import { readStore, writeStore } from './store';
 import { addEvent } from './events';
-import { generateNodeKey, sendTokens } from './wallet';
+import { fetchBalance, generateNodeKey, sendTokens } from './wallet';
+import { formatPrices } from './price';
 import { ensureNodePersisted, nodeDataDir, rememberSSH, startNode } from './node-manager';
 import { uploadFile, withSSH, runRemote, shellQuote } from './ssh';
 import { log } from './logger';
@@ -56,6 +58,14 @@ import type {
  */
 const OPERATOR_SEED_DVPN = 1;
 
+/**
+ * Gas headroom required on top of the seed amount for the MsgSend that funds
+ * the operator. A MsgSend at the default gas price costs ~0.002 DVPN; we ask
+ * for 0.05 to absorb gas-price spikes and leave the wallet with a non-zero
+ * balance after the seed.
+ */
+const DEPLOY_GAS_BUFFER_DVPN = 0.05;
+
 type ProgressFn = (p: DeployProgress) => void;
 type PushFn = (
   phase: DeployPhase,
@@ -71,6 +81,19 @@ interface RunningJob {
 }
 
 const jobs = new Map<string, RunningJob>();
+// Last DeployProgress event seen per job, kept long enough for CLI clients
+// to poll `deploy.status <jobId>` after a `deploy.start`. Cleared 60s after
+// a terminal phase ('done' | 'error' | 'cancelled').
+const lastProgress = new Map<string, DeployProgress>();
+const TERMINAL_PHASES = new Set<DeployProgress['phase']>(['done', 'error', 'cancelled']);
+
+export function getDeployProgress(jobId: string): DeployProgress | null {
+  return lastProgress.get(jobId) ?? null;
+}
+
+export function listDeployProgress(): DeployProgress[] {
+  return Array.from(lastProgress.values());
+}
 
 export async function startDeploy(
   req: DeployRequest,
@@ -82,6 +105,51 @@ export async function startDeploy(
   const store = await readStore();
   if (!store.wallet?.address) {
     throw new Error('Create or restore a wallet before deploying a node.');
+  }
+
+  // Cap concurrent local nodes. The chain treats nodes on the same public IP
+  // as duplicates for directory ranking, and each extra node multiplies disk,
+  // CPU, and bandwidth load on the host. Three is the soft ceiling we expose;
+  // above that the UX falls apart even before docker complains.
+  const MAX_LOCAL_NODES = 3;
+  if (req.target === 'local') {
+    const localCount = store.nodes.filter((n) => n.target === 'local').length;
+    if (localCount >= MAX_LOCAL_NODES) {
+      throw new Error(
+        `This machine already has ${localCount} local nodes (max ${MAX_LOCAL_NODES}). Remove one from the Nodes page before deploying another.`,
+      );
+    }
+    if (store.nodes.some((n) => n.target === 'local' && n.port === req.port)) {
+      throw new Error(
+        `Port ${req.port} is already in use by another local node. Pick a different port.`,
+      );
+    }
+  }
+  if (!Number.isInteger(req.port) || req.port < 1024 || req.port > 65535) {
+    throw new Error('Port must be an integer between 1024 and 65535.');
+  }
+
+  // Balance preflight: the deploy flow seeds OPERATOR_SEED_DVPN from the app
+  // wallet to the new operator address. Without this gate the chain rejects
+  // the MsgSend with `insufficient funds` AFTER we've already burned work on
+  // key generation, container builds, and the user's screen. Fail fast with
+  // a clear, actionable message instead.
+  const required = OPERATOR_SEED_DVPN + DEPLOY_GAS_BUFFER_DVPN;
+  let liveBalance: number;
+  try {
+    liveBalance = await fetchBalance(store.wallet.address);
+  } catch (err) {
+    throw new Error(
+      `Could not check app wallet balance before deploying: ${(err as Error).message}. ` +
+        'Confirm RPC connectivity and try again.',
+    );
+  }
+  if (liveBalance < required) {
+    throw new Error(
+      `App wallet has ${liveBalance.toFixed(4)} DVPN but needs at least ${required.toFixed(2)} DVPN ` +
+        `(${OPERATOR_SEED_DVPN} DVPN seed for the new node + ~${DEPLOY_GAS_BUFFER_DVPN.toFixed(2)} for gas). ` +
+        'Top up the app wallet and try again.',
+    );
   }
 
   // Mint the node's own operator key locally (24-word mnemonic, same HD
@@ -104,6 +172,9 @@ export async function startDeploy(
     port: req.port,
     gigabytePriceDVPN: req.gigabytePriceDVPN,
     hourlyPriceDVPN: req.hourlyPriceDVPN,
+    priceMode: req.priceMode ?? 'flat',
+    usdGigabytePrice: req.usdGigabytePrice,
+    usdHourlyPrice: req.usdHourlyPrice,
     serviceType: req.serviceType,
     registeredOnChain: false,
     remoteUrl: req.remoteUrl,
@@ -135,7 +206,20 @@ export async function startDeploy(
 
   const push: PushFn = (phase, percent, message, log, extras = {}) => {
     if (cancelled && phase !== 'error') return;
-    onProgress({ jobId, nodeId, phase, percent, message, log, ...extras });
+    const progress: DeployProgress = {
+      jobId,
+      nodeId,
+      phase,
+      percent,
+      message,
+      log: scrubLog(log),
+      ...extras,
+    };
+    lastProgress.set(jobId, progress);
+    if (TERMINAL_PHASES.has(phase)) {
+      setTimeout(() => lastProgress.delete(jobId), 60_000).unref?.();
+    }
+    onProgress(progress);
   };
 
   void (async () => {
@@ -145,7 +229,7 @@ export async function startDeploy(
       // transaction; without this step the node errors out at startup with
       // "account does not exist" while trying to query its own account
       // info, and the container restart-loops forever.
-      push('configure', 2, 'Funding operator address', `[${ts()}] seeding ${OPERATOR_SEED_DVPN} DVPN from app wallet → ${operatorAddress}`);
+      push('preflight', 1, 'Funding operator address', `[${ts()}] seeding ${OPERATOR_SEED_DVPN} DVPN from app wallet → ${operatorAddress}`);
       const fund = await sendTokens({
         to: operatorAddress,
         amountDVPN: OPERATOR_SEED_DVPN,
@@ -159,7 +243,7 @@ export async function startDeploy(
               : ''),
         );
       }
-      push('configure', 4, 'Operator address funded', `[${ts()}] tx ${fund.txHash?.slice(0, 16)}… · height ${fund.height}`);
+      push('preflight', 3, 'Operator address funded', `[${ts()}] tx ${fund.txHash?.slice(0, 16)}… · height ${fund.height}`);
 
       if (req.target === 'remote') {
         await runRemoteDeploy(req, node, nodeMnemonic, push, () => cancelled);
@@ -216,6 +300,12 @@ export function cancelDeploy(jobId: string): boolean {
   if (!job) return false;
   job.cancel();
   jobs.delete(jobId);
+  const prev = lastProgress.get(jobId);
+  if (prev) {
+    const cancelled: DeployProgress = { ...prev, phase: 'cancelled', message: 'Cancelled' };
+    lastProgress.set(jobId, cancelled);
+    setTimeout(() => lastProgress.delete(jobId), 60_000).unref?.();
+  }
   return true;
 }
 
@@ -230,18 +320,39 @@ async function runLocalDeploy(
   push: PushFn,
   isCancelled: () => boolean,
 ): Promise<void> {
-  push('preflight', 4, 'Checking Docker', `[${ts()}] Probing the Docker daemon…`);
+  push('docker-check', 6, 'Checking Docker', `[${ts()}] Probing the Docker daemon…`);
   const health = await dockerHealth();
   if (!health.reachable) {
-    throw new Error(
-      `Docker is not reachable: ${health.error}. Install Docker Desktop (macOS/Windows) or start the Docker Engine (Linux), then try again.`,
-    );
+    const hint =
+      health.reason === 'desktop-not-running'
+        ? 'Docker Desktop is installed but not running. Start it and try again.'
+        : health.reason === 'engine-not-running'
+          ? 'Start the Docker Engine (`sudo systemctl start docker`) and try again.'
+          : 'Install Docker Desktop (macOS/Windows) or Docker Engine (Linux), then try again.';
+    throw new Error(`Docker is not reachable: ${health.error}. ${hint}`);
   }
-  push('preflight', 8, 'Docker reachable', `[${ts()}] Docker ${health.version}`);
+  push('docker-check', 10, 'Docker reachable', `[${ts()}] Docker ${health.version}`);
 
   if (isCancelled()) return;
-  push('image-build', 12, 'Preparing node image', `[${ts()}] tag=${IMAGE_TAG} (first build can take 5–15 min; cached thereafter)`);
-  await ensureImage(IMAGE_TAG, (line) => push('image-build', 36, 'Preparing node image', line));
+  const imageCached = await hasImage(IMAGE_TAG);
+  if (imageCached) {
+    push(
+      'image-build',
+      45,
+      'Node image cached',
+      `[${ts()}] ${IMAGE_TAG} already in local store — skipping build`,
+    );
+  } else {
+    push(
+      'image-build',
+      12,
+      'Preparing node image',
+      `[${ts()}] tag=${IMAGE_TAG} (first build can take 5–15 min; cached thereafter)`,
+    );
+    await ensureImage(IMAGE_TAG, (line) =>
+      push('image-build', 36, 'Preparing node image', line),
+    );
+  }
 
   if (isCancelled()) return;
   const dataDir = nodeDataDir(node.id);
@@ -292,6 +403,9 @@ async function runLocalDeploy(
     serviceType: node.serviceType,
     gigabytePriceUdvpn: Math.round(req.gigabytePriceDVPN * 1_000_000),
     hourlyPriceUdvpn: Math.round(req.hourlyPriceDVPN * 1_000_000),
+    priceMode: req.priceMode ?? 'flat',
+    usdGigabytePrice: req.usdGigabytePrice,
+    usdHourlyPrice: req.usdHourlyPrice,
     remoteUrl: node.remoteUrl ?? `127.0.0.1:${node.port}`,
     keyName: 'operator',
   });
@@ -435,6 +549,9 @@ async function runRemoteDeploy(
       serviceType: node.serviceType,
       gigabytePriceUdvpn: Math.round(req.gigabytePriceDVPN * 1_000_000),
       hourlyPriceUdvpn: Math.round(req.hourlyPriceDVPN * 1_000_000),
+      priceMode: req.priceMode ?? 'flat',
+      usdGigabytePrice: req.usdGigabytePrice,
+      usdHourlyPrice: req.usdHourlyPrice,
       remoteUrl: node.remoteUrl ?? `${req.ssh!.host}:${node.port}`,
       keyName: 'operator',
     });
@@ -527,8 +644,14 @@ interface ConfigShape {
   moniker: string;
   port: number;
   serviceType: 'wireguard' | 'v2ray';
+  /** udvpn fallback (oracle mode) OR literal udvpn price (flat mode). */
   gigabytePriceUdvpn: number;
   hourlyPriceUdvpn: number;
+  /** Defaults to 'flat' if omitted — preserves current behaviour. */
+  priceMode?: 'flat' | 'oracle';
+  /** Required when priceMode === 'oracle'. */
+  usdGigabytePrice?: number;
+  usdHourlyPrice?: number;
   remoteUrl: string;
   keyName: string;
 }
@@ -573,12 +696,36 @@ function buildConfigTomlString(cfg: ConfigShape): string {
     handshake_dns: { enable: false, peers: 8 },
     node: {
       api_port: String(cfg.port),
-      // Price format is `denom:BASE,QUOTE`. BASE is a LegacyDec (fiat rate
-      // used by the on-chain oracle); QUOTE is a plain udvpn integer. We
-      // set BASE=0 so the oracle is disabled and the node quotes a flat
-      // udvpn price only — matches what the UI exposes.
-      gigabyte_prices: `${DENOM}:0,${cfg.gigabytePriceUdvpn}`,
-      hourly_prices: `${DENOM}:0,${cfg.hourlyPriceUdvpn}`,
+      // Price entries serialized via formatPrices() — multi-denom would
+      // need `;` (NOT `,`) and alphabetical denom ordering.
+      //
+      // Flat mode  → BASE=0, oracle disabled, node quotes the literal udvpn.
+      // Oracle mode → BASE=USD target (LegacyDec), QUOTE=udvpn fallback used
+      //   only when the on-chain Osmosis TWAP is unreachable.
+      gigabyte_prices:
+        cfg.priceMode === 'oracle'
+          ? formatPrices([
+              {
+                denom: DENOM,
+                base: cfg.usdGigabytePrice ?? 0,
+                quote: cfg.gigabytePriceUdvpn,
+              },
+            ])
+          : formatPrices([
+              { denom: DENOM, base: '0', quote: cfg.gigabytePriceUdvpn },
+            ]),
+      hourly_prices:
+        cfg.priceMode === 'oracle'
+          ? formatPrices([
+              {
+                denom: DENOM,
+                base: cfg.usdHourlyPrice ?? 0,
+                quote: cfg.hourlyPriceUdvpn,
+              },
+            ])
+          : formatPrices([
+              { denom: DENOM, base: '0', quote: cfg.hourlyPriceUdvpn },
+            ]),
       interval_best_rpc_addr: '5m0s',
       interval_geoip_location: '6h0m0s',
       interval_prices_update: '6h0m0s',
@@ -682,4 +829,23 @@ export function stripToHost(raw: string): string {
 function ts(): string {
   const d = new Date();
   return d.toISOString().split('T')[1]!.replace('Z', '');
+}
+
+// Final scrubber for anything we hand to the renderer. Belts-and-braces:
+// strips ANSI/CSI escapes (with or without the leading ESC byte — sentinel-dvpnx
+// emits zerolog's coloured logfmt and some pipelines drop the ESC), docker
+// stream-multiplex frame headers that occasionally survive when an upstream
+// command wasn't passed through stripDockerFrames, and trailing whitespace.
+const ANSI_WITH_ESC = /\x1B\[[0-?]*[ -/]*[@-~]|\x9B[0-?]*[ -/]*[@-~]/g;
+// Same SGR codes but with the ESC byte already lost (e.g. through a writer
+// that drops control bytes). We restrict to the SGR final byte `m` so we
+// don't accidentally eat legitimate `[42]` style content.
+const ANSI_WITHOUT_ESC = /\[\d{1,3}(?:;\d{1,3})*m/g;
+function scrubLog(s: string | undefined): string {
+  if (!s) return '';
+  return s
+    .replace(ANSI_WITH_ESC, '')
+    .replace(ANSI_WITHOUT_ESC, '')
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, '')
+    .trimEnd();
 }

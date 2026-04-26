@@ -1,8 +1,27 @@
+import type { ComponentType } from 'react';
+import {
+  ArrowCircleUp,
+  ArrowsClockwise,
+  CheckCircle,
+  CircleDashed,
+  CloudSlash,
+  Key,
+  PauseCircle,
+  Plugs,
+  Rocket,
+  SealCheck,
+  ShieldCheck,
+  SignOut,
+  Trash,
+  WarningCircle,
+  type IconProps,
+} from '@phosphor-icons/react';
 import type { AppEvent, EventKind } from '../../../shared/types';
 
 export const KIND_TONE: Record<EventKind, 'ok' | 'err' | 'warn' | 'accent'> = {
   'wallet-created': 'ok',
   'wallet-restored': 'ok',
+  'wallet-logout': 'warn',
   'deploy-started': 'accent',
   'deploy-succeeded': 'ok',
   'deploy-failed': 'err',
@@ -17,22 +36,33 @@ export const KIND_TONE: Record<EventKind, 'ok' | 'err' | 'warn' | 'accent'> = {
   'balance-refreshed': 'accent',
 };
 
-export const KIND_ICON_M: Record<EventKind, string> = {
-  'wallet-created': 'shield',
-  'wallet-restored': 'key',
-  'deploy-started': 'rocket_launch',
-  'deploy-succeeded': 'check_circle',
-  'deploy-failed': 'error',
-  'node-stopped': 'pause_circle',
-  'node-restarted': 'restart_alt',
-  'node-removed': 'delete',
-  'node-unreachable': 'cloud_off',
-  'node-online': 'check',
-  'node-registered': 'verified',
-  'withdraw-sent': 'arrow_upward',
-  'withdraw-failed': 'error',
-  'balance-refreshed': 'refresh',
+const KIND_ICON_MAP: Record<EventKind, ComponentType<IconProps>> = {
+  'wallet-created': ShieldCheck,
+  'wallet-restored': Key,
+  'wallet-logout': SignOut,
+  'deploy-started': Rocket,
+  'deploy-succeeded': CheckCircle,
+  'deploy-failed': WarningCircle,
+  'node-stopped': PauseCircle,
+  'node-restarted': ArrowsClockwise,
+  'node-removed': Trash,
+  'node-unreachable': CloudSlash,
+  'node-online': Plugs,
+  'node-registered': SealCheck,
+  'withdraw-sent': ArrowCircleUp,
+  'withdraw-failed': WarningCircle,
+  'balance-refreshed': ArrowsClockwise,
 };
+
+export function iconForKind(kind: EventKind): ComponentType<IconProps> {
+  return KIND_ICON_MAP[kind] ?? CircleDashed;
+}
+
+export const KIND_ICON: Record<EventKind, ComponentType<IconProps>> = new Proxy(KIND_ICON_MAP, {
+  get(target, prop: string) {
+    return target[prop as EventKind] ?? CircleDashed;
+  },
+});
 
 export function summarize(e: AppEvent): { title: string; subtitle: string } {
   return { title: e.title, subtitle: e.subtitle };

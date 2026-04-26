@@ -192,6 +192,29 @@ async function persistMnemonic(
   return { wallet, mnemonic };
 }
 
+/**
+ * Wipe the app wallet: delete the encrypted mnemonic file and clear the
+ * persisted wallet record. Per-node operator mnemonics (separate files
+ * keyed by node id) are NOT touched — those still exist if you reimport
+ * the same recovery phrase. The renderer should treat a successful return
+ * as "back to WalletSetup".
+ */
+export async function logoutWallet(): Promise<void> {
+  try {
+    await fs.unlink(mnemonicPath());
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  const store = await readStore();
+  store.wallet = null;
+  await writeStore(store);
+  await addEvent({
+    kind: 'wallet-logout',
+    title: 'Wallet logged out',
+    subtitle: 'Encrypted vault cleared',
+  });
+}
+
 /** Query current DVPN balance for the app wallet. Silent on RPC failure. */
 export async function refreshWalletBalance(): Promise<WalletState> {
   const store = await readStore();

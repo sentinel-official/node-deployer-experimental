@@ -11,6 +11,8 @@ import {
   type DeployRequest,
   type LocalSystemReport,
   type MetricsWindow,
+  type NodeLogExportRequest,
+  type NodeLogExportResult,
   type NodeWithdrawRequest,
   type SSHCredentials,
   type SSHTestResult,
@@ -18,13 +20,20 @@ import {
   type UpdateNodePricingRequest,
 } from '../shared/types';
 import { testSSHConnection } from './services/ssh';
-import { startDeploy, cancelDeploy, primeDeploySettings } from './services/deploy';
+import {
+  startDeploy,
+  cancelDeploy,
+  primeDeploySettings,
+  getDeployProgress,
+  listDeployProgress,
+} from './services/deploy';
 import {
   getWallet,
   createWallet,
   restoreWallet,
   refreshWalletBalance,
   sendTokens,
+  logoutWallet,
 } from './services/wallet';
 import {
   listNodes,
@@ -41,10 +50,26 @@ import {
 } from './services/nodes';
 import { listEvents } from './services/events';
 import { getSettings, updateSettings } from './services/settings';
-import { dockerHealth } from './services/docker';
+import {
+  dockerHealth,
+  startDockerDesktop,
+  resetDockerClient,
+  dockerOverview,
+  stopAllSentinelContainers,
+  pruneDangling,
+  quitDockerDesktop,
+  forceQuitDockerDesktop,
+} from './services/docker';
 import { healthAll, invalidateHealthCache } from './services/sentinel-client';
-import { logDir } from './services/logger';
+import { logDir, log } from './services/logger';
 import { readStore, writeStore } from './services/store';
+import {
+  getCliState,
+  runFromApp,
+  startCliServer,
+  stopCliServer,
+} from './services/cli-server';
+import { spawn } from 'node:child_process';
 
 function broadcast(channel: string, payload: unknown) {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -72,15 +97,38 @@ async function reportLocalSystem(): Promise<LocalSystemReport> {
     memoryOk: memMb >= 2048,
     diskFreeGb: 50,
     diskOk: true,
-    dockerInstalled: health.reachable,
+    dockerInstalled: health.reachable || (health.desktop?.installed ?? false),
     dockerVersion: health.version,
     dockerReachable: health.reachable,
     dockerError: health.error,
+    dockerReason: health.reason,
+    dockerDesktop: health.desktop,
   };
 }
 
 export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.SYSTEM_REPORT, reportLocalSystem);
+  ipcMain.handle(IPC.DOCKER_START, async () => {
+    const result = await startDockerDesktop();
+    // Clear the cached Docker client so once the daemon finishes booting,
+    // the next `dockerHealth()` re-probes sockets instead of returning
+    // the stale "not reachable" client.
+    resetDockerClient();
+    return result;
+  });
+  ipcMain.handle(IPC.DOCKER_OVERVIEW, () => dockerOverview());
+  ipcMain.handle(IPC.DOCKER_STOP_ALL_SENTINEL, () => stopAllSentinelContainers());
+  ipcMain.handle(IPC.DOCKER_PRUNE, () => pruneDangling());
+  ipcMain.handle(IPC.DOCKER_QUIT, async () => {
+    const result = await quitDockerDesktop();
+    resetDockerClient();
+    return result;
+  });
+  ipcMain.handle(IPC.DOCKER_FORCE_QUIT, async () => {
+    const result = await forceQuitDockerDesktop();
+    resetDockerClient();
+    return result;
+  });
 
   // -- Settings --------------------------------------------------------------
   ipcMain.handle(IPC.SETTINGS_GET, () => getSettings());
@@ -106,6 +154,7 @@ export function registerIpcHandlers(): void {
       color: { dark: '#0B1020', light: '#FFFFFF' },
     }),
   );
+  ipcMain.handle(IPC.WALLET_LOGOUT, () => logoutWallet());
 
   // -- Events ----------------------------------------------------------------
   ipcMain.handle(IPC.EVENTS_LIST, (_e, limit?: number) => listEvents(limit));
@@ -124,6 +173,9 @@ export function registerIpcHandlers(): void {
     });
   });
   ipcMain.handle(IPC.DEPLOY_CANCEL, (_e, jobId: string) => cancelDeploy(jobId));
+  ipcMain.handle(IPC.DEPLOY_STATUS, (_e, jobId?: string) =>
+    jobId ? getDeployProgress(jobId) : listDeployProgress(),
+  );
 
   // -- Nodes -----------------------------------------------------------------
   ipcMain.handle(IPC.NODES_LIST, () => listNodes());
@@ -133,6 +185,11 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.NODES_START, (_e, id: string) => startNode(id));
   ipcMain.handle(IPC.NODES_REMOVE, (_e, id: string) => removeNode(id));
   ipcMain.handle(IPC.NODES_LOGS, (_e, id: string) => recentLogs(id));
+  ipcMain.handle(
+    IPC.NODES_EXPORT_LOGS,
+    async (_e, req: NodeLogExportRequest): Promise<NodeLogExportResult> =>
+      exportNodeLogs(req),
+  );
   ipcMain.handle(IPC.NODES_STATUS, (_e, id: string) => nodeStatus(id));
   ipcMain.handle(IPC.NODES_HISTORY, (_e, id: string, window: MetricsWindow) =>
     nodeHistory(id, window),
@@ -144,7 +201,11 @@ export function registerIpcHandlers(): void {
     return withdrawFromNode(req.nodeId, to, req.amountDVPN);
   });
   ipcMain.handle(IPC.NODES_UPDATE_PRICING, async (_e, req: UpdateNodePricingRequest) =>
-    updateNodePricing(req.nodeId, req.gigabytePriceDVPN, req.hourlyPriceDVPN),
+    updateNodePricing(req.nodeId, req.gigabytePriceDVPN, req.hourlyPriceDVPN, {
+      priceMode: req.priceMode,
+      usdGigabytePrice: req.usdGigabytePrice,
+      usdHourlyPrice: req.usdHourlyPrice,
+    }),
   );
 
   ipcMain.handle(IPC.NODES_BACKUP_MNEMONIC, async (_e, nodeId: string, mnemonic: string) => {
@@ -155,6 +216,88 @@ export function registerIpcHandlers(): void {
     store.nodeBackups[nodeId] = safeStorage.encryptString(mnemonic).toString('base64');
     await writeStore(store);
     return { ok: true };
+  });
+
+  ipcMain.handle(IPC.NODES_REVEAL_MNEMONIC, async (_e, nodeId: string) => {
+    const store = await readStore();
+    const blob = store.nodeBackups[nodeId];
+    if (!blob) {
+      return {
+        ok: false,
+        error:
+          'No mnemonic backup is stored for this node. The mnemonic is shown only once during deploy; if you skipped saving the encrypted backup then, it cannot be recovered here.',
+      };
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { ok: false, error: 'OS keychain unavailable — cannot decrypt backup.' };
+    }
+    try {
+      const mnemonic = safeStorage.decryptString(Buffer.from(blob, 'base64'));
+      return { ok: true, mnemonic };
+    } catch (err) {
+      return { ok: false, error: `Failed to decrypt backup: ${(err as Error).message}` };
+    }
+  });
+
+  // -- CLI server ------------------------------------------------------------
+  ipcMain.handle(IPC.CLI_STATUS, () => getCliState());
+  ipcMain.handle(IPC.CLI_START, async () => {
+    try {
+      return await startCliServer();
+    } catch (err) {
+      return { ...getCliState(), error: (err as Error).message };
+    }
+  });
+  ipcMain.handle(IPC.CLI_STOP, () => stopCliServer());
+  ipcMain.handle(IPC.CLI_RUN, async (_e, line: string) => runFromApp(line));
+  ipcMain.handle(IPC.CLI_OPEN_POWERSHELL, async () => {
+    const state = getCliState();
+    if (state.status === 'off') {
+      return { ok: false, error: 'CLI server is not running. Start it first.' };
+    }
+    if (process.platform !== 'win32') {
+      return {
+        ok: false,
+        error:
+          'Open in PowerShell is Windows-only. On macOS / Linux, run: node ./bin/sentinel-node-manager.js',
+      };
+    }
+    try {
+      const binDir = path.join(app.getAppPath(), 'bin');
+      const script = path.join(binDir, 'sentinel-node-manager.js');
+      // `cmd /c start` is the canonical way to spawn a new visible console
+      // window from a GUI process on Windows. `spawn(powershell, …, { detached })`
+      // alone doesn't get a console — the window never appears. The empty
+      // string after `start` is the window title (required when the next
+      // arg is quoted).
+      const psCmd = `Write-Host 'Sentinel Node Manager CLI — type help'; node "${script.replace(/"/g, '`"')}"`;
+      const child = spawn(
+        'cmd.exe',
+        [
+          '/c',
+          'start',
+          '""',
+          'powershell.exe',
+          '-NoProfile',
+          '-NoLogo',
+          '-NoExit',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-Command',
+          psCmd,
+        ],
+        {
+          detached: true,
+          stdio: 'ignore',
+          windowsHide: true,
+        },
+      );
+      child.on('error', (err) => log.warn('cli powershell spawn error', { err: String(err) }));
+      child.unref();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
   });
 
   // -- Diagnostics / online ---------------------------------------------------
@@ -221,4 +364,101 @@ async function exportDiagnostics(targetZip: string): Promise<void> {
     /* no logs yet */
   }
   zip.writeZip(targetZip);
+}
+
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\[[0-9]{1,3}(?:;[0-9]{1,3})*m/g;
+
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, '');
+}
+
+function parseLineForJson(raw: string): {
+  raw: string;
+  timestamp: string | null;
+  level: string | null;
+  message: string;
+  fields: Record<string, string>;
+} {
+  const line = stripAnsi(raw).replace(/\s+$/u, '');
+  let timestamp: string | null = null;
+  let rest = line;
+  const tsMatch = rest.match(
+    /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\s+(.*)$/u,
+  );
+  if (tsMatch) {
+    timestamp = tsMatch[1];
+    rest = tsMatch[2];
+  }
+  let level: string | null = null;
+  const lvlMatch = rest.match(
+    /^\[?(ERROR|ERR|WARN(?:ING)?|INFO|INF|DEBUG|DBG|TRACE|TRC|FATAL|FTL)\]?[:\s]\s*(.*)$/iu,
+  );
+  if (lvlMatch) {
+    level = lvlMatch[1].toUpperCase();
+    rest = lvlMatch[2];
+  }
+  const fields: Record<string, string> = {};
+  const kvRe = /([A-Za-z_][\w.-]*)=("(?:[^"\\]|\\.)*"|\[[^\]]*\]|\S+)/g;
+  let firstIdx = -1;
+  let m: RegExpExecArray | null;
+  while ((m = kvRe.exec(rest))) {
+    if (firstIdx < 0) firstIdx = m.index;
+    let value = m[2];
+    if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+    fields[m[1]] = value;
+  }
+  const message = firstIdx < 0 ? rest.trim() : rest.slice(0, firstIdx).trim();
+  return { raw, timestamp, level, message, fields };
+}
+
+async function exportNodeLogs(req: NodeLogExportRequest): Promise<NodeLogExportResult> {
+  try {
+    const node = await getNode(req.nodeId);
+    const moniker = node?.moniker?.replace(/[^A-Za-z0-9_.-]/g, '_') ?? req.nodeId;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const ext = req.format === 'json' ? 'json' : req.format === 'log' ? 'log' : 'txt';
+    const defaultName = `${moniker}-logs-${stamp}.${ext}`;
+
+    const filters =
+      req.format === 'json'
+        ? [{ name: 'JSON', extensions: ['json'] }]
+        : req.format === 'log'
+          ? [{ name: 'Log file', extensions: ['log'] }]
+          : [{ name: 'Plain text', extensions: ['txt'] }];
+
+    const { filePath, canceled } = await dialog.showSaveDialog({
+      title: 'Export container logs',
+      defaultPath: defaultName,
+      filters,
+    });
+    if (canceled || !filePath) return { ok: false, cancelled: true };
+
+    let body: string;
+    if (req.format === 'json') {
+      const parsed = req.lines.map(parseLineForJson);
+      body = JSON.stringify(
+        {
+          nodeId: req.nodeId,
+          moniker: node?.moniker ?? null,
+          exportedAt: new Date().toISOString(),
+          lineCount: parsed.length,
+          lines: parsed,
+        },
+        null,
+        2,
+      );
+    } else {
+      // plain text + .log format share the same ANSI-stripped line body
+      body = req.lines.map((l) => stripAnsi(l).replace(/\s+$/u, '')).join('\n') + '\n';
+    }
+
+    await fs.writeFile(filePath, body, 'utf8');
+    shell.showItemInFolder(filePath);
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
 }

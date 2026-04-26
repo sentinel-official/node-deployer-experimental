@@ -1,19 +1,24 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <!--
-      CSP: only `self` for scripts/connects. Tailwind JIT injects inline
-      <style> blocks so `style-src` needs `unsafe-inline`, but `script-src`
-      is strictly `self`. The renderer never does external `fetch`; all
-      RPC traffic happens in main.
-    -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data:; connect-src 'self';"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline'; font-src 'self' data: https://fonts.gstatic.com https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'self';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Sentinel dVPN</title>
+    <title>Sentinel Node Manager</title>
+    <script>
+      // Pre-paint theme: avoids light/dark flash on reload.
+      (function () {
+        try {
+          var t = localStorage.getItem('theme');
+          document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+        } catch (_) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

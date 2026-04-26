@@ -1,13 +1,16 @@
 import { app, BrowserWindow, safeStorage } from 'electron';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import {
   IMAGE_TAG,
   containerLogs,
   containerName,
+  getClient as getDockerClient,
   isRunning,
   removeContainer,
   restartContainer,
   runNode,
+  setRestartPolicy,
   stopContainer,
 } from './docker';
 import { readClients, signClient } from './sentinel-client';
@@ -16,10 +19,14 @@ import { addEvent } from './events';
 import { recordSample, purgeNode, history } from './metrics';
 import { DENOM, dvpnToUdvpn, udvpnToDvpn } from './chain';
 import { signerFromMnemonic } from './wallet';
+import { formatBase } from './price';
 import { withSSH, runRemote, shellQuote } from './ssh';
 import { GasPrice } from '@cosmjs/stargate';
 import { getSettings } from './settings';
+import { resolveCountry } from './geoip';
 import { fromBech32, toBech32 } from '@cosmjs/encoding';
+import { BaseSession } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/session/v3/session';
+import { Status } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/types/v1/status';
 
 /**
  * Sentinel stores the *node* identity under a distinct bech32 HRP
@@ -37,42 +44,80 @@ function accountToNodeAddr(accountAddr: string): string {
 }
 
 /**
- * The sessions index returns a heterogeneous `Any[]` of session variants
- * (WireGuard, V2Ray). We pick out the fields common to all of them for
- * the Node Details "Active Subscriptions" card. Best-effort — unknown
- * session types fall back to a minimal record.
+ * `sessionsForNode` returns `Any[]` — the concrete session variants
+ * (WireGuard / V2Ray) all embed the same `BaseSession` at field tag 1,
+ * so decoding the Any bytes as BaseSession gives us every field we show
+ * in the "Active Subscriptions" card. The tail bytes (protocol-specific
+ * session details) are ignored by the decoder, which is the behaviour we
+ * want.
+ *
+ * Returns `null` for sessions we cannot decode or that aren't actually
+ * active on-chain, so the caller can filter them out — previously the
+ * code surfaced empty rows and showed them as live subscriptions.
  */
-function summarizeSession(raw: unknown): NodeSession {
-  const obj = decodeMaybeAny(raw) ?? (raw as Record<string, unknown>);
-  const getField = (k: string) => (obj as Record<string, unknown>)[k];
-  const id = String(getField('id') ?? getField('ID') ?? '');
-  const accAddress = String(getField('accAddress') ?? getField('acc_address') ?? '');
-  const bandwidthObj = (getField('bandwidth') ?? getField('bytes')) as
-    | { upload?: unknown; download?: unknown; upload_bytes?: unknown; download_bytes?: unknown }
-    | undefined;
-  const bytesOut = Number(bandwidthObj?.upload ?? bandwidthObj?.upload_bytes ?? 0);
-  const bytesIn = Number(bandwidthObj?.download ?? bandwidthObj?.download_bytes ?? 0);
-  const durNs = Number(getField('duration') ?? 0);
-  const durationSeconds = durNs > 0 ? Math.round(durNs / 1e9) : 0;
-  const status = typeof getField('status') === 'string' ? String(getField('status')) : undefined;
-  const short = accAddress ? `${accAddress.slice(0, 10)}…${accAddress.slice(-6)}` : id.slice(0, 12);
+function summarizeSession(raw: unknown): NodeSession | null {
+  const decoded = decodeBaseSession(raw);
+  if (!decoded) return null;
+
+  // Only STATUS_ACTIVE is a live subscription. INACTIVE_PENDING means
+  // the user pressed stop and the session is winding down; INACTIVE
+  // means it already ended. Filter both out so the card reflects reality.
+  if (decoded.status !== Status.STATUS_ACTIVE) return null;
+
+  const id = decoded.id?.toString?.() ?? String(decoded.id ?? '');
+  const accAddress = decoded.accAddress || '';
+  // BaseSession upload/download are wire-encoded as string-bigints
+  // (cosmos-sdk `sdk.Int`). Safe to Number() — bytes counters won't
+  // exceed 2^53 in any realistic session.
+  const bytesIn = Number(decoded.downloadBytes || '0');
+  const bytesOut = Number(decoded.uploadBytes || '0');
+  const durSec = decoded.duration
+    ? Number(decoded.duration.seconds?.toString?.() ?? decoded.duration.seconds ?? 0) +
+      Math.round((decoded.duration.nanos ?? 0) / 1e6) / 1000
+    : 0;
+  const short = accAddress
+    ? `${accAddress.slice(0, 10)}…${accAddress.slice(-6)}`
+    : id.slice(0, 12);
+
   return {
     id,
     subscriber: accAddress || id,
     subscriberShort: short,
     bytesIn,
     bytesOut,
-    durationSeconds,
-    status,
+    durationSeconds: Math.max(0, Math.round(durSec)),
+    status: 'STATUS_ACTIVE',
   };
 }
 
-function decodeMaybeAny(v: unknown): Record<string, unknown> | null {
-  if (!v || typeof v !== 'object') return null;
-  // An `Any` from the SDK has { typeUrl, value: Uint8Array }. We don't
-  // bother decoding the protobuf here — we just fall back to property
-  // inspection on the outer object.
-  return v as Record<string, unknown>;
+/**
+ * Accepts either a raw `{ typeUrl, value: Uint8Array }` Any from the
+ * query client, or an already-decoded BaseSession (defensive — some SDK
+ * versions auto-decode). Returns undefined when the shape is unknown or
+ * the bytes fail to parse, so callers can treat it as "skip this row".
+ */
+function decodeBaseSession(raw: unknown): BaseSession | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+
+  // Already-decoded object (has the fields we expect).
+  if (typeof r.accAddress === 'string' && r.id !== undefined) {
+    return r as unknown as BaseSession;
+  }
+
+  // Protobuf Any: { typeUrl, value: Uint8Array }.
+  const value = r.value;
+  const typeUrl = typeof r.typeUrl === 'string' ? r.typeUrl : '';
+  if (!(value instanceof Uint8Array)) return undefined;
+  // Sentinel wraps both wireguard + v2ray session variants in types that
+  // embed BaseSession at tag 1 — so decoding the outer bytes directly as
+  // BaseSession grabs the shared fields. Unknown tags are skipped.
+  try {
+    return BaseSession.decode(value);
+  } catch (err) {
+    log.debug('BaseSession.decode failed', { typeUrl, err: (err as Error).message });
+    return undefined;
+  }
 }
 import type {
   DeployedNode,
@@ -174,8 +219,29 @@ export async function startNode(id: string): Promise<void> {
     const name = containerName(node.id);
     try {
       if (node.runtimeId && (await isRunning(node.runtimeId))) {
+        await setRestartPolicy(node.runtimeId, 'unless-stopped');
         await updateNode(id, { status: 'online' });
         return;
+      }
+      // Container exists but is stopped — start it and restore restart policy.
+      if (node.runtimeId) {
+        const c = await getDockerClient();
+        try {
+          const container = c.getContainer(node.runtimeId);
+          await container.inspect();
+          await setRestartPolicy(node.runtimeId, 'unless-stopped');
+          await container.start();
+          const now = Date.now();
+          startedAt.set(id, now);
+          await updateNode(id, {
+            status: 'online',
+            startedAt: new Date(now).toISOString(),
+          });
+          log.info('node started (local, resumed)', { id, name });
+          return;
+        } catch {
+          /* container missing — fall through to recreate */
+        }
       }
     } catch {
       /* fall through to recreate */
@@ -184,7 +250,6 @@ export async function startNode(id: string): Promise<void> {
       nodeId: node.id,
       hostDataDir: nodeDataDir(node.id),
       port: node.port,
-      apiPort: 19781,
       imageTag: IMAGE_TAG,
     });
     const now = Date.now();
@@ -285,6 +350,14 @@ export async function removeNode(id: string): Promise<void> {
       } catch (err) {
         log.warn('removeContainer failed', { err: (err as Error).message });
       }
+    }
+    try {
+      await fs.rm(nodeDataDir(id), { recursive: true, force: true });
+    } catch (err) {
+      log.warn('node data dir cleanup failed', {
+        path: nodeDataDir(id),
+        err: (err as Error).message,
+      });
     }
   } else {
     const creds = sshKeyring.get(id);
@@ -387,7 +460,16 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
         .catch(() => ({ amount: '0' }));
       const chainHeight = await stargate.getHeight().catch(() => undefined);
 
-      const reachable = Boolean(onChain);
+      // "reachable" means the node is actually serving traffic: it is both
+      // registered on-chain AND its local container is running. Without the
+      // container check a stopped node stays marked reachable (the on-chain
+      // registration record persists forever), which causes the poller to
+      // flip the UI back to "online" after an explicit stop.
+      let containerUp = true;
+      if (node.target === 'local') {
+        containerUp = node.runtimeId ? await isRunning(node.runtimeId).catch(() => false) : false;
+      }
+      const reachable = Boolean(onChain) && containerUp;
       const earnings = udvpnToDvpn(balanceCoin.amount);
 
       // Sessions currently served by the node. The on-chain sessions index
@@ -399,13 +481,18 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       if (sentinel && reachable) {
         try {
           const res = await sentinel.session.sessionsForNode(nodeAddr);
-          sessionsCount = res.sessions.length;
-          for (const raw of res.sessions.slice(0, 20)) {
+          // Only count sessions we could actually decode AND that are
+          // marked STATUS_ACTIVE. The raw list includes winding-down and
+          // already-ended sessions, which aren't "live subscribers".
+          for (const raw of res.sessions) {
             const summary = summarizeSession(raw);
+            if (!summary) continue;
             bytesIn += summary.bytesIn;
             bytesOut += summary.bytesOut;
             activeSubscriptions.push(summary);
+            if (activeSubscriptions.length >= 20) break;
           }
+          sessionsCount = activeSubscriptions.length;
         } catch (err) {
           log.debug('sessions query failed', { err: (err as Error).message });
         }
@@ -421,6 +508,21 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       const patch: Partial<typeof node> = {};
       if (earnings !== node.balanceDVPN) patch.balanceDVPN = earnings;
       if (reachable !== node.registeredOnChain) patch.registeredOnChain = reachable;
+      if (!node.country) {
+        const geoHost =
+          node.target === 'remote'
+            ? node.host
+            : node.remoteUrl
+              ? stripToHostSafe(node.remoteUrl)
+              : undefined;
+        if (geoHost) {
+          const geo = await resolveCountry(geoHost);
+          if (geo) {
+            patch.country = geo.country;
+            patch.countryName = geo.countryName;
+          }
+        }
+      }
       if (Object.keys(patch).length) await updateNode(id, patch);
 
       return {
@@ -489,10 +591,17 @@ export function startPoller(): void {
           reachable: status.reachable,
         });
 
-        // Health transitions fire events so the user sees unreachable alerts.
-        // `loading` → `online` on first successful probe (covers freshly-deployed nodes
-        // that sit in "Starting" until the chain sees them register).
-        if (status.reachable && node.status !== 'online') {
+        // Health transitions:
+        //   loading → online   on first successful probe (freshly-deployed
+        //                      nodes sit in "Starting" until the chain sees
+        //                      them register).
+        //   online  → offline  when an online node becomes unreachable.
+        // We deliberately do NOT promote `offline → online`. `offline` is
+        // user-initiated (they clicked Stop) and must be sticky — the user
+        // restarts it explicitly. Without this rule the poller flips a
+        // stopped node back to online because the on-chain registration
+        // record outlives the container.
+        if (status.reachable && node.status === 'loading') {
           await transition(node.id, 'online');
           await addEvent({
             kind: 'node-online',
@@ -647,11 +756,24 @@ export async function updateNodePricing(
   nodeId: string,
   gigabytePriceDVPN: number,
   hourlyPriceDVPN: number,
+  opts: {
+    priceMode?: 'flat' | 'oracle';
+    usdGigabytePrice?: number;
+    usdHourlyPrice?: number;
+  } = {},
 ): Promise<{ ok: boolean; txHash?: string; error?: string }> {
   const node = await getNode(nodeId);
   if (!node) return { ok: false, error: 'Node not found' };
   if (!(gigabytePriceDVPN >= 0) || !(hourlyPriceDVPN >= 0)) {
     return { ok: false, error: 'Prices must be non-negative' };
+  }
+  if (opts.priceMode === 'oracle') {
+    if (!((opts.usdGigabytePrice ?? -1) >= 0) || !((opts.usdHourlyPrice ?? -1) >= 0)) {
+      return {
+        ok: false,
+        error: 'Oracle pricing requires non-negative USD targets for GB and hour.',
+      };
+    }
   }
 
   const store = await readStore();
@@ -688,13 +810,17 @@ export async function updateNodePricing(
       const gas = 250_000;
       const feeUdvpn = String(Math.max(1, Math.ceil(gas * Number(settings.gasPriceUdvpn))));
       const fee = { amount: [{ denom: DENOM, amount: feeUdvpn }], gas: String(gas) };
+      const gbBase =
+        opts.priceMode === 'oracle' ? formatBase(opts.usdGigabytePrice ?? 0) : '0';
+      const hrBase =
+        opts.priceMode === 'oracle' ? formatBase(opts.usdHourlyPrice ?? 0) : '0';
       const result = await client.nodeUpdateDetails({
-        from,
+        from: accountToNodeAddr(from),
         gigabytePrices: [
-          { denom: DENOM, baseValue: '0', quoteValue: String(giga) } as never,
+          { denom: DENOM, baseValue: gbBase, quoteValue: String(giga) } as never,
         ],
         hourlyPrices: [
-          { denom: DENOM, baseValue: '0', quoteValue: String(hour) } as never,
+          { denom: DENOM, baseValue: hrBase, quoteValue: String(hour) } as never,
         ],
         remoteUrl: stripToHostSafe(remoteAddr),
         fee,
@@ -712,11 +838,18 @@ export async function updateNodePricing(
       await updateNode(nodeId, {
         gigabytePriceDVPN,
         hourlyPriceDVPN,
+        priceMode: opts.priceMode ?? 'flat',
+        usdGigabytePrice: opts.priceMode === 'oracle' ? opts.usdGigabytePrice : undefined,
+        usdHourlyPrice: opts.priceMode === 'oracle' ? opts.usdHourlyPrice : undefined,
       });
+      const priceLabel =
+        opts.priceMode === 'oracle'
+          ? `gigabyte=$${opts.usdGigabytePrice ?? 0} USD (fallback ${gigabytePriceDVPN} P2P) · hourly=$${opts.usdHourlyPrice ?? 0} USD (fallback ${hourlyPriceDVPN} P2P)`
+          : `gigabyte=${gigabytePriceDVPN} P2P · hourly=${hourlyPriceDVPN} P2P`;
       await addEvent({
         kind: 'node-restarted', // re-use a neutral event kind
         title: `Pricing updated: ${node.moniker}`,
-        subtitle: `gigabyte=${gigabytePriceDVPN} DVPN · hourly=${hourlyPriceDVPN} DVPN`,
+        subtitle: priceLabel,
         relatedNodeId: nodeId,
         txHash: result.transactionHash,
       });

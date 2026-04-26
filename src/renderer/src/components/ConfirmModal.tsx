@@ -28,38 +28,58 @@ export function ConfirmModal() {
   const requireMatch = confirmPrompt.requireType?.trim();
   const canConfirm = !requireMatch || typed.trim() === requireMatch;
 
+  const toneColor =
+    confirmPrompt.tone === 'danger'
+      ? 'var(--red)'
+      : confirmPrompt.tone === 'warning'
+        ? 'var(--yellow)'
+        : 'var(--accent)';
+  const iconName =
+    confirmPrompt.tone === 'danger'
+      ? 'delete_forever'
+      : confirmPrompt.tone === 'warning'
+        ? 'warning'
+        : 'help';
+  const confirmBtnClass =
+    confirmPrompt.tone === 'danger'
+      ? 'btn btn-danger'
+      : confirmPrompt.tone === 'warning'
+        ? 'btn btn-secondary'
+        : 'btn btn-primary';
+
   return (
     <div
-      className="fixed inset-0 z-40 grid place-items-center bg-black/60 backdrop-blur-sm no-drag"
+      className="fixed inset-0 z-40 grid place-items-center no-drag"
+      style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}
       onClick={(e) => e.target === e.currentTarget && resolveConfirm(false)}
     >
-      <div className="card-elev w-[440px] max-w-[90vw] p-6">
+      <div
+        className="w-[440px] max-w-[90vw] p-6"
+        style={{
+          background: 'var(--bg-card)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-lg)',
+          boxShadow: 'var(--shadow-elev)',
+        }}
+      >
         <div className="flex items-start gap-3">
           <div
-            className={[
-              'h-10 w-10 rounded-lg grid place-items-center flex-shrink-0',
-              confirmPrompt.tone === 'danger' && 'bg-danger/15 text-danger',
-              confirmPrompt.tone === 'warning' && 'bg-warning/15 text-warning',
-              (!confirmPrompt.tone || confirmPrompt.tone === 'info') && 'bg-accent/15 text-accent',
-            ]
-              .filter(Boolean)
-              .join(' ')}
+            className="h-10 w-10 rounded-lg grid place-items-center flex-shrink-0"
+            style={{
+              background: `color-mix(in srgb, ${toneColor} 15%, transparent)`,
+              color: toneColor,
+            }}
           >
-            <MIcon
-              name={
-                confirmPrompt.tone === 'danger'
-                  ? 'delete_forever'
-                  : confirmPrompt.tone === 'warning'
-                  ? 'warning'
-                  : 'help'
-              }
-              size={22}
-            />
+            <MIcon name={iconName} size={22} />
           </div>
-          <div className="flex-1">
-            <div className="text-base font-semibold text-text">{confirmPrompt.title}</div>
+          <div className="flex-1 min-w-0">
+            <div className="text-base font-semibold" style={{ color: 'var(--text)' }}>
+              {confirmPrompt.title}
+            </div>
             {confirmPrompt.body && (
-              <div className="mt-1 text-sm text-text-muted">{confirmPrompt.body}</div>
+              <div className="mt-1 text-sm" style={{ color: 'var(--text-dim)' }}>
+                {confirmPrompt.body}
+              </div>
             )}
           </div>
         </div>
@@ -67,7 +87,11 @@ export function ConfirmModal() {
         {requireMatch && (
           <div className="mt-4">
             <div className="field-label">
-              Type <span className="font-mono text-text">{requireMatch}</span> to confirm
+              Type{' '}
+              <span className="font-mono" style={{ color: 'var(--text)' }}>
+                {requireMatch}
+              </span>{' '}
+              to confirm
             </div>
             <input
               autoFocus
@@ -79,15 +103,11 @@ export function ConfirmModal() {
         )}
 
         <div className="mt-6 flex items-center justify-end gap-2">
-          <button className="btn-secondary" onClick={() => resolveConfirm(false)}>
+          <button className="btn btn-secondary" onClick={() => resolveConfirm(false)}>
             {confirmPrompt.cancelLabel ?? 'Cancel'}
           </button>
           <button
-            className={
-              confirmPrompt.tone === 'danger'
-                ? 'btn bg-danger text-white hover:bg-danger/80'
-                : 'btn-primary'
-            }
+            className={confirmBtnClass}
             disabled={!canConfirm}
             onClick={() => resolveConfirm(true)}
           >

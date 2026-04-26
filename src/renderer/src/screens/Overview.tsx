@@ -1,15 +1,25 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { StatCard } from '../components/StatCard';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
 import { fmtDVPN, relativeTime } from '../lib/format';
-import { KIND_TONE, KIND_ICON_M } from '../lib/events';
+import { KIND_ICON } from '../lib/events';
 import type { NodeStatus } from '../../../shared/types';
 
+const STAT_COL = 'col-span-6 lg:col-span-3';
+
 export function Overview() {
-  const { nodes, events, navigate, refreshWallet, refreshNodes, refreshEvents, liveStatuses, refreshStatus } =
-    useApp();
+  const {
+    nodes,
+    events,
+    navigate,
+    refreshWallet,
+    refreshNodes,
+    refreshEvents,
+    liveStatuses,
+    refreshStatus,
+  } = useApp();
 
   useEffect(() => {
     for (const n of nodes) void refreshStatus(n.id);
@@ -25,30 +35,51 @@ export function Overview() {
         peers += s.sessions;
       }
     }
-    const earned = nodes.reduce((sum, n) => sum + n.balanceDVPN, 0);
-    const uptimePct = nodes.length === 0 ? 0 : (reachable / nodes.length) * 100;
-    return { peers, earned, uptimePct, reachable };
+    const liquidBalance = nodes.reduce((sum, n) => sum + n.balanceDVPN, 0);
+    return { peers, liquidBalance, reachable };
   }, [nodes, liveStatuses]);
+
+  const [lastRefreshed, setLastRefreshed] = useState<number>(() => Date.now());
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
 
   const refreshAll = () => {
     void refreshWallet();
     void refreshNodes();
     void refreshEvents();
     for (const n of nodes) void refreshStatus(n.id);
+    setLastRefreshed(Date.now());
   };
 
+  const staleSeconds = Math.floor((now - lastRefreshed) / 1000);
+  const stale = staleSeconds > 90;
+
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col h-full min-h-0 gap-4">
       <PageHeader
         title="Dashboard"
         subtitle="Real-time status of your decentralized VPN infrastructure."
         right={
           <>
-            <button className="btn-secondary" onClick={refreshAll} title="Refresh (⌘R)">
+            <span
+              className="text-[11px] mr-1"
+              style={{ color: stale ? 'var(--yellow, #f5b04a)' : 'var(--text-dim)' }}
+              title={new Date(lastRefreshed).toLocaleString()}
+            >
+              {stale ? 'Stale · ' : 'Updated '}
+              {relativeTime(new Date(lastRefreshed).toISOString())}
+            </span>
+            <button className="btn btn-secondary" onClick={refreshAll} title="Refresh">
               <MIcon name="refresh" size={14} />
               Refresh
             </button>
-            <button className="btn-primary" onClick={() => navigate({ name: 'deploy' })}>
+            <button
+              className="btn btn-primary"
+              onClick={() => navigate({ name: 'deploy-local' })}
+            >
               <MIcon name="add" size={14} />
               Deploy a node
             </button>
@@ -56,137 +87,153 @@ export function Overview() {
         }
       />
 
-      <div className="flex-1 min-h-0 grid grid-cols-12 gap-4 overflow-hidden">
-        <div className="col-span-12 lg:col-span-8 space-y-4 min-h-0 overflow-y-auto pr-1">
-          <div className="card p-6 bg-gradient-to-br from-accent/20 via-bg-card to-bg-card">
-            <div className="text-[11px] uppercase tracking-wider text-accent font-semibold">
-              Expand your network reach
-            </div>
-            <div className="mt-1 text-lg font-semibold text-text max-w-md">
-              Increase your presence on the decentralized VPN network by deploying
-              another node across diverse locations.
-            </div>
-            <button className="btn-primary mt-5" onClick={() => navigate({ name: 'deploy' })}>
-              <MIcon name="rocket_launch" size={14} />
-              Deploy another node
-            </button>
-          </div>
+      <div className="grid grid-cols-12 gap-4">
+        <StatCard
+          className={STAT_COL}
+          label="Connected peers"
+          value={totals.peers.toString()}
+          caption={nodes.length === 0 ? 'Deploy a node to start' : ' '}
+        />
+        <StatCard
+          className={STAT_COL}
+          label="Number of nodes"
+          value={nodes.length.toString()}
+          caption={nodes.length === 0 ? 'None deployed' : `${totals.reachable} online`}
+        />
+        <StatCard
+          className={STAT_COL}
+          label="Total node balance"
+          value={`${fmtDVPN(totals.liquidBalance)} $P2P`}
+          caption="Sum across all node operators"
+        />
+        <StatCard
+          className={STAT_COL}
+          label="Recent events"
+          value={events.length.toString()}
+          caption={events[0] ? relativeTime(events[0].timestamp) : 'no activity yet'}
+        />
+      </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <StatCard
-              label="Connected peers"
-              value={totals.peers.toString()}
-              caption={nodes.length === 0 ? 'Deploy a node to start' : `across ${totals.reachable} online nodes`}
-              accent="accent"
-            />
-            <StatCard
-              label="Uptime score"
-              value={`${totals.uptimePct.toFixed(1)}%`}
-              caption={`${totals.reachable} / ${nodes.length} reachable`}
-              accent="success"
-            />
-            <StatCard
-              label="On-chain rewards"
-              value={`${fmtDVPN(totals.earned)} $P2P`}
-              caption="Node operator balance total"
-            />
-          </div>
-
-          <div className="card">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <div className="section-title">Network nodes</div>
+      <div className="grid grid-cols-12 gap-4 flex-1 min-h-0">
+        <div className="col-span-12 lg:col-span-8 flex flex-col min-h-0 gap-4">
+          {nodes.length === 0 ? (
+            <div className="card flex-1 min-h-0 overflow-hidden flex flex-col">
+              <div className="card-header">
+                <div className="card-title">My nodes</div>
+              </div>
+              <div className="card-body flex-1">
+                <div className="empty-state">
+                  <MIcon name="dns" size={28} />
+                  <div className="font-semibold" style={{ color: 'var(--text)' }}>
+                    No nodes yet
+                  </div>
+                  <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    Deploy your first node to start earning rewards.
+                  </div>
+                  <button
+                    className="btn btn-primary mt-2"
+                    onClick={() => navigate({ name: 'deploy-local' })}
+                  >
+                    <MIcon name="rocket_launch" size={14} />
+                    Deploy a node
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
               <button
-                className="text-xs text-accent hover:text-accent-strong inline-flex items-center gap-1"
+                type="button"
                 onClick={() => navigate({ name: 'nodes' })}
+                className="card text-left transition-colors"
+                style={{ cursor: 'pointer' }}
+                title="Open My Nodes"
               >
-                View all <MIcon name="arrow_forward" size={12} />
+                <div className="card-body flex items-center gap-3 py-3">
+                  <div
+                    className="h-9 w-9 rounded-md grid place-items-center flex-shrink-0"
+                    style={{
+                      background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+                      color: 'var(--accent)',
+                    }}
+                  >
+                    <MIcon name="dns" size={18} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
+                      Added nodes ({nodes.length})
+                    </div>
+                    <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      {totals.reachable} online · view all in My Nodes
+                    </div>
+                  </div>
+                  <span
+                    className="text-[11px] flex items-center gap-1"
+                    style={{ color: 'var(--accent)' }}
+                  >
+                    View here
+                    <MIcon name="arrow_forward" size={14} />
+                  </span>
+                </div>
               </button>
-            </div>
-            {nodes.length === 0 ? (
-              <div className="px-5 py-10 text-center text-text-muted text-sm">
-                No nodes yet. Deploy your first one to start earning rewards.
-              </div>
-            ) : (
-              <div className="max-h-[420px] overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="text-[10px] text-text-dim uppercase tracking-wider">
-                  <tr>
-                    <th className="text-left font-medium px-5 py-2">Moniker</th>
-                    <th className="text-left font-medium px-5 py-2">Status</th>
-                    <th className="text-left font-medium px-5 py-2">Host</th>
-                    <th className="text-left font-medium px-5 py-2">Balance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {nodes.map((n) => {
-                    const s = liveStatuses[n.id];
-                    return (
-                      <tr
-                        key={n.id}
-                        onClick={() => navigate({ name: 'node-details', id: n.id })}
-                        className="border-t border-border hover:bg-bg-elev/60 cursor-pointer"
-                      >
-                        <td className="px-5 py-3 font-medium text-text">{n.moniker}</td>
-                        <td className="px-5 py-3">
-                          <StatusChip status={n.status} reachable={s?.reachable} />
-                        </td>
-                        <td className="px-5 py-3 text-text-muted font-mono text-xs">
-                          {n.host ?? 'localhost'}:{n.port}
-                        </td>
-                        <td className="px-5 py-3 text-text-muted">
-                          {fmtDVPN(n.balanceDVPN)} $P2P
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-              </div>
-            )}
-          </div>
+          )}
         </div>
 
-        <div className="col-span-12 lg:col-span-4 space-y-4 min-h-0 overflow-y-auto pr-1">
-          <div className="card p-5">
-            <div className="section-title mb-3">Recent activity</div>
-            {events.length === 0 ? (
-              <div className="text-xs text-text-dim">No activity yet.</div>
-            ) : (
-              <ul className="space-y-3 max-h-[360px] overflow-y-auto pr-1 -mr-1">
-                {events.slice(0, 30).map((e) => {
-                  const tone = KIND_TONE[e.kind];
-                  const toneCls =
-                    tone === 'ok'
-                      ? 'bg-success/15 text-success'
-                      : tone === 'err'
-                      ? 'bg-danger/15 text-danger'
-                      : tone === 'warn'
-                      ? 'bg-warning/15 text-warning'
-                      : 'bg-accent/15 text-accent';
-                  return (
-                    <li key={e.id} className="flex items-start gap-3">
-                      <div className={`mt-0.5 h-7 w-7 rounded-md grid place-items-center ${toneCls}`}>
-                        <MIcon name={KIND_ICON_M[e.kind]} size={14} />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-medium text-text">{e.title}</div>
-                        {e.subtitle && (
-                          <div className="text-[11px] text-text-muted truncate">{e.subtitle}</div>
-                        )}
-                      </div>
-                      <div className="text-[10px] text-text-dim whitespace-nowrap">
-                        {relativeTime(e.timestamp)}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-
-          <div className="card p-5">
-            <div className="section-title mb-2">App wallet</div>
-            <AppWalletSummary />
+        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0">
+          <div className="card flex flex-col min-h-0 overflow-hidden flex-1">
+            <div className="card-header">
+              <div className="card-title">Recent activity</div>
+            </div>
+            <div className="card-body flex-1 min-h-0 overflow-auto">
+              {events.length === 0 ? (
+                <div
+                  className="text-xs text-center py-6"
+                  style={{ color: 'var(--text-dim)' }}
+                >
+                  No activity yet.
+                </div>
+              ) : (
+                <ul className="flex flex-col gap-3">
+                  {events.slice(0, 20).map((e) => {
+                    const Icon = KIND_ICON[e.kind];
+                    return (
+                      <li key={e.id} className="flex items-start gap-3">
+                        <div
+                          className="h-7 w-7 rounded-md grid place-items-center flex-shrink-0"
+                          style={{
+                            background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+                            color: 'var(--accent)',
+                          }}
+                        >
+                          <Icon size={14} weight="regular" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className="text-xs font-medium"
+                            style={{ color: 'var(--text)' }}
+                          >
+                            {e.title}
+                          </div>
+                          {e.subtitle && (
+                            <div
+                              className="text-[11px] truncate"
+                              style={{ color: 'var(--text-muted)' }}
+                            >
+                              {e.subtitle}
+                            </div>
+                          )}
+                        </div>
+                        <div
+                          className="text-[10px] whitespace-nowrap"
+                          style={{ color: 'var(--text-dim)' }}
+                        >
+                          {relativeTime(e.timestamp)}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -195,36 +242,40 @@ export function Overview() {
 }
 
 function StatusChip({ status, reachable }: { status: NodeStatus; reachable?: boolean }) {
-  if (status === 'loading') return <span className="chip-warn">● Starting</span>;
-  if (status === 'error') return <span className="chip-err">● Error</span>;
-  if (status === 'offline') return <span className="chip-err">● Offline</span>;
+  if (status === 'loading')
+    return (
+      <span className="chip chip-warn">
+        <span
+          className="h-1.5 w-1.5 rounded-full"
+          style={{ background: 'var(--yellow)' }}
+        />
+        Starting
+      </span>
+    );
+  if (status === 'error')
+    return (
+      <span className="chip chip-danger">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--red)' }} />
+        Error
+      </span>
+    );
+  if (status === 'offline')
+    return (
+      <span className="chip chip-danger">
+        <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--red)' }} />
+        Offline
+      </span>
+    );
   return reachable ? (
-    <span className="chip-ok">● Online</span>
+    <span className="chip chip-success">
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--green)' }} />
+      Online
+    </span>
   ) : (
-    <span className="chip-warn">● Syncing</span>
+    <span className="chip chip-warn">
+      <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--yellow)' }} />
+      Syncing
+    </span>
   );
 }
 
-function AppWalletSummary() {
-  const { wallet, navigate } = useApp();
-  if (!wallet?.address) {
-    return (
-      <button className="btn-primary w-full" onClick={() => navigate({ name: 'wallet-setup' })}>
-        <MIcon name="shield" size={14} />
-        Set up wallet
-      </button>
-    );
-  }
-  return (
-    <>
-      <div className="text-2xl font-semibold">
-        {fmtDVPN(wallet.balanceDVPN)} <span className="text-text-muted text-lg">$P2P</span>
-      </div>
-      <div className="mt-1 text-[11px] text-text-dim font-mono truncate">{wallet.address}</div>
-      <button className="btn-secondary mt-3 w-full" onClick={() => navigate({ name: 'wallet' })}>
-        <MIcon name="arrow_forward" size={14} />
-        Open wallet
-      </button>
-    </>
-  );
-}

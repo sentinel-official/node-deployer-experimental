@@ -1,4 +1,4 @@
-# Sentinel dVPN — Desktop
+# Sentinel Node Manager
 
 Cross-platform Electron app that deploys and operates
 [Sentinel dVPN](https://sentinel.co) nodes — locally on the user's machine

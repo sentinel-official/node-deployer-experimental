@@ -22,6 +22,11 @@ export const updateNodePricing = (
   id: string,
   gigabytePriceDVPN: number,
   hourlyPriceDVPN: number,
-) => manager.updateNodePricing(id, gigabytePriceDVPN, hourlyPriceDVPN);
+  opts: {
+    priceMode?: 'flat' | 'oracle';
+    usdGigabytePrice?: number;
+    usdHourlyPrice?: number;
+  } = {},
+) => manager.updateNodePricing(id, gigabytePriceDVPN, hourlyPriceDVPN, opts);
 
 export type { DeployedNode, NodeLiveStatus };

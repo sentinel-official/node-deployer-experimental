@@ -6,3 +6,10 @@ release/
 .env
 .env.local
 *.log
+*.tsbuildinfo
+build-ctx/
+
+# Tester-only — never commit
+scripts/
+findings/
+design-exports/

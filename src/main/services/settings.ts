@@ -21,6 +21,10 @@ function defaults(): AppSettings {
     gasPriceUdvpn: DEFAULT_GAS_PRICE_UDVPN,
     dockerSocket: '',
     seenOnboarding: false,
+    minimizeToTrayOnClose: true,
+    stopNodesOnQuit: false,
+    trayHintShown: false,
+    stopCliServerOnQuit: true,
   };
 }
 

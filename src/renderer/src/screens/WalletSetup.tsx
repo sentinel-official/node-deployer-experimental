@@ -1,19 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { MIcon } from '../components/MIcon';
 import { QRCode } from '../components/QRCode';
 import { useApp } from '../store/app';
 import { fmtDVPN, shortAddr } from '../lib/format';
 
-/**
- * First-launch flow.
- *
- *   1. Choose — create or restore.
- *   2. For create, display the 24-word mnemonic exactly once; user must
- *      tick "I've backed this up" before proceeding.
- *   3. Funding status panel — live on-chain balance + QR for the sent1…
- *      address, refresh button re-queries the RPC.
- */
 export function WalletSetup() {
   const { wallet, setWallet, refreshWallet, navigate, pushToast } = useApp();
   const [mode, setMode] = useState<'choose' | 'restore' | 'reveal' | 'funded'>(
@@ -26,6 +17,7 @@ export function WalletSetup() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [chainError, setChainError] = useState<string | null>(null);
 
   const doCreate = async () => {
     setError(null);
@@ -35,7 +27,11 @@ export function WalletSetup() {
       setWallet(res.wallet);
       setFreshMnemonic(res.mnemonic);
       setMode('reveal');
-      pushToast({ title: 'Wallet created', body: 'Write down the mnemonic next.', tone: 'success' });
+      pushToast({
+        title: 'Wallet created',
+        body: 'Record your recovery phrase before continuing.',
+        tone: 'success',
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -50,7 +46,11 @@ export function WalletSetup() {
       const w = await window.api.wallet.restore(mnemonic);
       setWallet(w);
       setMode('funded');
-      pushToast({ title: 'Wallet restored', body: shortAddr(w.address, 10, 6), tone: 'success' });
+      pushToast({
+        title: 'Wallet restored',
+        body: shortAddr(w.address, 10, 6),
+        tone: 'success',
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -60,12 +60,34 @@ export function WalletSetup() {
 
   const doRefresh = async () => {
     setRefreshing(true);
+    setChainError(null);
     try {
       await refreshWallet();
+    } catch (e) {
+      setChainError((e as Error).message);
     } finally {
       setRefreshing(false);
     }
   };
+
+  // Probe chain on entry to the funded view so a balance of 0 with a
+  // dead RPC surfaces as "chain unreachable" instead of "wallet empty".
+  useEffect(() => {
+    if (mode !== 'funded' || !wallet?.address) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        await refreshWallet();
+        if (!cancelled) setChainError(null);
+      } catch (e) {
+        if (!cancelled) setChainError((e as Error).message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, wallet?.address]);
 
   const copyAddress = async () => {
     if (!wallet?.address) return;
@@ -75,172 +97,222 @@ export function WalletSetup() {
   };
 
   return (
-    <div>
+    <div className="flex flex-col gap-5 max-w-4xl mx-auto w-full pb-6">
       <PageHeader
-        title="Wallet Setup"
-        subtitle="Configure your digital vault to participate in the Sentinel dVPN network. Your mnemonic is encrypted by your OS keychain and never leaves this device."
+        title="Wallet setup"
+        subtitle="Your recovery phrase is encrypted by the OS keychain and never leaves this device."
       />
 
       {mode === 'choose' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <ChoiceCard
             icon="shield"
-            title="Create New Wallet"
-            desc="Generate a fresh BIP-39 mnemonic with 24 words. It is shown exactly once — store it safely."
-            cta={busy ? 'Working…' : 'Initialize Secure Vault'}
+            title="Create new wallet"
+            desc="Generate a fresh 24-word BIP-39 recovery phrase. The phrase is displayed only once, so store it securely."
+            cta={busy ? 'Working…' : 'Initialize secure vault'}
             ctaIcon="add"
             busy={busy}
             onClick={doCreate}
           />
           <ChoiceCard
             icon="key"
-            title="Use Existing Wallet"
-            desc="Import an existing Sentinel / Cosmos account using its 12, 15, 18, 21 or 24-word mnemonic."
-            cta="Restore via Seed Phrase"
+            title="Restore existing wallet"
+            desc="Import an existing Sentinel or Cosmos account using its 12 to 24-word recovery phrase."
+            cta="Restore from recovery phrase"
             ctaIcon="key_vertical"
             busy={false}
             onClick={() => setMode('restore')}
             secondary
           />
-          {error && <div className="md:col-span-2 chip-err">{error}</div>}
+          {error && <div className="md:col-span-2 callout callout-danger">{error}</div>}
         </div>
       )}
 
       {mode === 'restore' && (
-        <div className="card p-6 max-w-2xl">
-          <div className="text-sm font-semibold mb-2">Restore from mnemonic</div>
-          <p className="text-xs text-text-muted mb-4">
-            Paste your recovery phrase. It is encrypted with your OS keychain as soon as it
-            arrives; the plaintext never touches disk.
-          </p>
-          <textarea
-            value={mnemonic}
-            onChange={(e) => setMnemonic(e.target.value)}
-            rows={4}
-            placeholder="tribe solution puppy eager nasty lonely …"
-            className="field-input font-mono"
-          />
-          {error && <div className="mt-3 text-xs text-danger">{error}</div>}
-          <div className="mt-4 flex gap-2 justify-end">
-            <button className="btn-secondary" onClick={() => setMode('choose')} disabled={busy}>
-              Back
-            </button>
-            <button className="btn-primary" onClick={doRestore} disabled={busy || !mnemonic.trim()}>
-              {busy ? 'Restoring…' : 'Restore wallet'}
-              <MIcon name="arrow_forward" size={14} />
-            </button>
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">Restore from mnemonic</div>
+          </div>
+          <div className="card-body flex flex-col gap-3">
+            <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Paste your recovery phrase below. It is encrypted by the OS keychain on receipt
+              and the plaintext is never written to disk.
+            </p>
+            <textarea
+              value={mnemonic}
+              onChange={(e) => setMnemonic(e.target.value)}
+              rows={4}
+              placeholder="tribe solution puppy eager nasty lonely …"
+              className="field-input mono-inline text-sm"
+              style={{ lineHeight: 1.7 }}
+            />
+            {error && <div className="callout callout-danger text-xs">{error}</div>}
+            <div className="flex gap-2 justify-end">
+              <button
+                className="btn btn-secondary"
+                onClick={() => setMode('choose')}
+                disabled={busy}
+              >
+                Back
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={doRestore}
+                disabled={busy || !mnemonic.trim()}
+              >
+                {busy ? 'Restoring…' : 'Restore wallet'}
+                <MIcon name="arrow_forward" size={14} />
+              </button>
+            </div>
           </div>
         </div>
       )}
 
       {mode === 'reveal' && freshMnemonic && (
-        <div className="card-elev p-6 border-warning/40 max-w-2xl">
-          <div className="flex items-center gap-2 text-warning text-xs uppercase tracking-wider font-semibold mb-2">
-            <MIcon name="warning" size={16} />
-            Write down your mnemonic — shown exactly once
-          </div>
-          <div className="font-mono text-sm text-text bg-bg-input rounded-lg p-4 border border-border leading-relaxed break-words">
-            {freshMnemonic}
-          </div>
-          <button
-            className="mt-3 btn-ghost text-xs"
-            onClick={async () => {
-              await navigator.clipboard.writeText(freshMnemonic);
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1400);
-            }}
-          >
-            <MIcon name="content_copy" size={14} />
-            {copied ? 'Copied' : 'Copy mnemonic'}
-          </button>
-
-          <label className="mt-6 flex items-center gap-2 text-sm text-text cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={confirmedBackup}
-              onChange={(e) => setConfirmedBackup(e.target.checked)}
-              className="h-4 w-4"
-            />
-            I have safely stored my 24-word recovery phrase. If I lose it, the wallet can't be recovered.
-          </label>
-
-          <div className="mt-4 flex justify-end">
-            <button
-              className="btn-primary"
-              disabled={!confirmedBackup}
-              onClick={() => {
-                setFreshMnemonic(null);
-                setMode('funded');
-              }}
-            >
-              Continue
-              <MIcon name="arrow_forward" size={14} />
-            </button>
-          </div>
-        </div>
+        <MnemonicReveal
+          mnemonic={freshMnemonic}
+          copied={copied}
+          onCopy={async () => {
+            await navigator.clipboard.writeText(freshMnemonic);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          }}
+          confirmedBackup={confirmedBackup}
+          onConfirm={(v) => setConfirmedBackup(v)}
+          onContinue={() => {
+            setFreshMnemonic(null);
+            setMode('funded');
+          }}
+        />
       )}
 
       {mode === 'funded' && wallet?.address && (
         <>
-          <div className="section-title mb-3">Funding status</div>
-          <div className="card p-6">
-            <div className="flex items-center justify-between">
-              <div className="text-xs text-text-muted uppercase tracking-wider">
-                Sentinel mainnet deposit address
-              </div>
-              <span className="chip-ok">
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title">Funding status</div>
+              <span className="chip chip-success">
                 <MIcon name="verified" size={12} />
                 Ready
               </span>
             </div>
-            <div className="mt-3 flex items-center gap-4">
-              <QRCode value={wallet.address} size={96} />
-              <div className="flex-1 min-w-0">
-                <div className="font-mono text-sm text-text break-all">{wallet.address}</div>
-                <div className="mt-0.5 flex items-center gap-2 text-[11px] text-text-dim">
-                  <span>{shortAddr(wallet.address, 10, 8)}</span>
-                  <button
-                    onClick={copyAddress}
-                    className="text-accent hover:text-accent-strong flex items-center gap-1"
+            <div className="card-body flex flex-col gap-4">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                <QRCode value={wallet.address} size={104} />
+                <div className="flex-1 min-w-0 w-full">
+                  <div
+                    className="text-[11px] uppercase tracking-wider mb-1"
+                    style={{ color: 'var(--text-dim)' }}
                   >
-                    <MIcon name="content_copy" size={12} /> {copied ? 'Copied' : 'Copy'}
-                  </button>
+                    Wallet address
+                  </div>
+                  <div
+                    className="mono-inline text-[13px] break-all leading-relaxed"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    {wallet.address}
+                  </div>
+                  <div
+                    className="mt-2 flex items-center gap-3 text-[11px]"
+                    style={{ color: 'var(--text-dim)' }}
+                  >
+                    <span>{shortAddr(wallet.address, 10, 8)}</span>
+                    <button
+                      onClick={copyAddress}
+                      className="flex items-center gap-1"
+                      style={{ color: 'var(--accent)' }}
+                    >
+                      <MIcon name="content_copy" size={12} />
+                      {copied ? 'Copied' : 'Copy'}
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div className="mt-6 grid grid-cols-2 gap-6">
-              <div>
-                <div className="text-[11px] text-text-dim uppercase tracking-wider">Current balance</div>
-                <div className="mt-1 text-2xl font-semibold">
-                  {fmtDVPN(wallet.balanceDVPN)}{' '}
-                  <span className="text-text-muted text-lg">$P2P</span>
+              {chainError && (
+                <div className="callout callout-danger text-xs flex items-start gap-2">
+                  <MIcon name="cloud_off" size={14} />
+                  <div className="flex-1">
+                    <div className="font-semibold">Sentinel chain unreachable</div>
+                    <div style={{ color: 'var(--text-muted)' }}>
+                      The balance below may be stale. The RPC endpoint did not respond:{' '}
+                      <span className="mono-inline">{chainError}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-6">
+                <div>
+                  <div
+                    className="text-[11px] uppercase tracking-wider"
+                    style={{ color: 'var(--text-dim)' }}
+                  >
+                    Current balance
+                  </div>
+                  <div
+                    className="mt-1 text-2xl font-semibold"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    {fmtDVPN(wallet.balanceDVPN)}{' '}
+                    <span className="text-lg" style={{ color: 'var(--text-muted)' }}>
+                      $P2P
+                    </span>
+                  </div>
+                </div>
+                <div>
+                  <div
+                    className="text-[11px] uppercase tracking-wider"
+                    style={{ color: 'var(--text-dim)' }}
+                  >
+                    Recommended for deploy
+                  </div>
+                  <div
+                    className="mt-1 text-2xl font-semibold"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    10.00{' '}
+                    <span className="text-lg" style={{ color: 'var(--text-muted)' }}>
+                      $P2P
+                    </span>
+                  </div>
                 </div>
               </div>
-              <div>
-                <div className="text-[11px] text-text-dim uppercase tracking-wider">Recommended for deploy</div>
-                <div className="mt-1 text-2xl font-semibold">
-                  10.00 <span className="text-text-muted text-lg">$P2P</span>
-                </div>
+              <div
+                className="text-xs leading-relaxed px-3 py-2.5"
+                style={{
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <b style={{ color: 'var(--text)' }}>About the app wallet.</b> The app wallet
+                holds gas for transactions and receives rewards withdrawn from your nodes. Each
+                node has its own operator key, generated during sentinel-dvpnx initialization.
               </div>
-            </div>
-            <div className="mt-5 rounded-lg border border-border bg-bg-input p-3 text-xs text-text-muted leading-relaxed">
-              <b className="text-text">Why this matters?</b> Your app wallet holds gas for
-              transactions and receives rewards withdrawn from your nodes. Nodes have their
-              own operator keys generated during `sentinel-dvpnx init`.
             </div>
           </div>
 
-          <div className="mt-6 flex items-center justify-between">
-            <button className="btn-ghost" onClick={() => setMode('choose')}>
+          <div className="flex items-center justify-between">
+            <button
+              className="btn btn-ghost"
+              onClick={() => setMode('choose')}
+            >
               <MIcon name="arrow_back" size={14} />
               Back to selection
             </button>
             <div className="flex gap-2">
-              <button className="btn-secondary" onClick={doRefresh} disabled={refreshing}>
+              <button
+                className="btn btn-secondary"
+                onClick={doRefresh}
+                disabled={refreshing}
+              >
                 <MIcon name="refresh" size={14} />
                 {refreshing ? 'Querying chain…' : 'Refresh balance'}
               </button>
-              <button className="btn-primary" onClick={() => navigate({ name: 'overview' })}>
+              <button
+                className="btn btn-primary"
+                onClick={() => navigate({ name: 'overview' })}
+              >
                 Proceed to dashboard
                 <MIcon name="arrow_forward" size={14} />
               </button>
@@ -248,6 +320,174 @@ export function WalletSetup() {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+function MnemonicReveal({
+  mnemonic,
+  copied,
+  onCopy,
+  confirmedBackup,
+  onConfirm,
+  onContinue,
+}: {
+  mnemonic: string;
+  copied: boolean;
+  onCopy: () => void | Promise<void>;
+  confirmedBackup: boolean;
+  onConfirm: (v: boolean) => void;
+  onContinue: () => void;
+}) {
+  const [revealed, setRevealed] = useState(false);
+  const words = mnemonic.trim().split(/\s+/);
+
+  return (
+    <div
+      className="card"
+      style={{
+        borderColor: 'color-mix(in srgb, var(--yellow) 45%, var(--border))',
+      }}
+    >
+      <div className="card-header">
+        <div
+          className="card-title flex items-center gap-2"
+          style={{ color: 'var(--yellow)' }}
+        >
+          <MIcon name="warning" size={18} />
+          Record your recovery phrase
+        </div>
+        <span
+          className="text-[10px] uppercase tracking-wider px-2 py-1 rounded"
+          style={{
+            background: 'color-mix(in srgb, var(--yellow) 14%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--yellow) 35%, transparent)',
+            color: 'var(--yellow)',
+          }}
+        >
+          Displayed only once
+        </span>
+      </div>
+      <div className="card-body flex flex-col gap-4">
+        <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+          Write these {words.length} words down in order. Anyone with this phrase can spend
+          your funds. The phrase is shown once and is never displayed again.
+        </p>
+
+        <div className="relative">
+          <div
+            className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2"
+            style={{
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '14px',
+              filter: revealed ? 'none' : 'blur(8px)',
+              transition: 'filter 200ms ease',
+              userSelect: revealed ? 'auto' : 'none',
+              pointerEvents: revealed ? 'auto' : 'none',
+            }}
+          >
+            {words.map((word, i) => (
+              <div
+                key={`${i}-${word}`}
+                className="flex items-center gap-2 px-2.5 py-2"
+                style={{
+                  background: 'var(--bg-card)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm, 8px)',
+                }}
+              >
+                <span
+                  className="tabular-nums text-[11px] font-semibold"
+                  style={{ color: 'var(--text-dim)', minWidth: '1.5rem' }}
+                >
+                  {String(i + 1).padStart(2, '0')}
+                </span>
+                <span
+                  className="font-mono text-[13px] truncate"
+                  style={{ color: 'var(--text)' }}
+                >
+                  {word}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {!revealed && (
+            <button
+              type="button"
+              onClick={() => setRevealed(true)}
+              className="absolute inset-0 flex flex-col items-center justify-center gap-2"
+              style={{
+                background: 'color-mix(in srgb, var(--bg) 55%, transparent)',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--text)',
+              }}
+            >
+              <MIcon name="visibility" size={22} />
+              <span className="text-sm font-semibold">Click to reveal phrase</span>
+              <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                Make sure no one is looking at your screen
+              </span>
+            </button>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            className="btn btn-secondary text-xs"
+            onClick={() => void onCopy()}
+            disabled={!revealed}
+          >
+            <MIcon name="content_copy" size={14} />
+            {copied ? 'Copied' : 'Copy phrase'}
+          </button>
+          {revealed && (
+            <button
+              className="btn btn-ghost text-xs"
+              onClick={() => setRevealed(false)}
+              title="Hide the phrase again"
+            >
+              <MIcon name="visibility_off" size={14} />
+              Hide
+            </button>
+          )}
+          <span
+            className="text-[11px] ml-auto"
+            style={{ color: 'var(--text-dim)' }}
+          >
+            {words.length} words · BIP-39
+          </span>
+        </div>
+
+        <label
+          className="flex items-start gap-2 text-sm cursor-pointer select-none"
+          style={{ color: 'var(--text)' }}
+        >
+          <input
+            type="checkbox"
+            checked={confirmedBackup}
+            onChange={(e) => onConfirm(e.target.checked)}
+            className="h-4 w-4 mt-0.5 flex-shrink-0"
+          />
+          <span className="leading-snug">
+            I have securely stored my recovery phrase. The wallet cannot be recovered if this
+            phrase is lost.
+          </span>
+        </label>
+
+        <div className="flex justify-end">
+          <button
+            className="btn btn-primary"
+            disabled={!confirmedBackup}
+            onClick={onContinue}
+          >
+            Continue
+            <MIcon name="arrow_forward" size={14} />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -272,20 +512,33 @@ function ChoiceCard({
   secondary?: boolean;
 }) {
   return (
-    <div className="card p-6 flex flex-col">
-      <div className="h-11 w-11 rounded-xl bg-accent/15 border border-accent/30 grid place-items-center text-accent">
-        <MIcon name={icon} size={22} />
+    <div className="card col-span-12 md:col-span-6 flex flex-col">
+      <div className="card-body flex flex-col flex-1 gap-3">
+        <div
+          className="h-11 w-11 rounded-lg grid place-items-center"
+          style={{
+            background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+            color: 'var(--accent)',
+          }}
+        >
+          <MIcon name={icon} size={20} />
+        </div>
+        <div className="text-lg font-semibold" style={{ color: 'var(--text)' }}>
+          {title}
+        </div>
+        <p className="text-sm flex-1" style={{ color: 'var(--text-muted)' }}>
+          {desc}
+        </p>
+        <button
+          onClick={onClick}
+          disabled={busy}
+          className={`btn ${secondary ? 'btn-secondary' : 'btn-primary'} w-full`}
+        >
+          <MIcon name={ctaIcon} size={14} />
+          {cta}
+        </button>
       </div>
-      <div className="mt-4 text-lg font-semibold text-text">{title}</div>
-      <p className="mt-1.5 text-sm text-text-muted flex-1">{desc}</p>
-      <button
-        onClick={onClick}
-        disabled={busy}
-        className={secondary ? 'btn-secondary mt-5 w-full' : 'btn-primary mt-5 w-full'}
-      >
-        <MIcon name={ctaIcon} size={14} />
-        {cta}
-      </button>
     </div>
   );
 }

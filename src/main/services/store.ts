@@ -63,7 +63,18 @@ export async function readStore(): Promise<StoreShape> {
 
 export async function writeStore(next: StoreShape): Promise<void> {
   cached = next;
-  const dir = path.dirname(storePath());
+  const target = storePath();
+  const dir = path.dirname(target);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(storePath(), JSON.stringify(next, null, 2), 'utf8');
+  // Atomic write: serialize to a sibling temp file first, then rename. A
+  // crash mid-write therefore cannot leave `store.json` truncated — the
+  // previous good copy stays intact until the rename completes.
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
+  try {
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }

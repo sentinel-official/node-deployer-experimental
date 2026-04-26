@@ -17,7 +17,8 @@ export function Help() {
   const exportDiagnostics = async () => {
     const res = await window.api.system.exportDiagnostics();
     if (res.cancelled) return;
-    if (res.ok) pushToast({ title: 'Diagnostics exported', body: res.path, tone: 'success' });
+    if (res.ok)
+      pushToast({ title: 'Diagnostics exported', body: res.path, tone: 'success' });
     else pushToast({ title: 'Export failed', body: res.error, tone: 'error' });
   };
 
@@ -28,47 +29,41 @@ export function Help() {
 
   const installUpdate = async () => {
     const res = await window.api.updater.install();
-    if (!res.ok && res.error) pushToast({ title: 'Update install failed', body: res.error, tone: 'error' });
+    if (!res.ok && res.error)
+      pushToast({ title: 'Update install failed', body: res.error, tone: 'error' });
   };
 
   return (
-    <div>
+    <div className="flex flex-col h-full min-h-0 gap-3">
       <PageHeader
         title="Help"
-        subtitle="Guides, shortcuts, and diagnostics for running a Sentinel dVPN node from this app."
+        subtitle="Guides, shortcuts, and diagnostics for running a Sentinel dVPN node."
         right={
-          <button className="btn-secondary" onClick={exportDiagnostics}>
-            <MIcon name="download" size={14} />
-            Export diagnostics
-          </button>
+          <>
+            <UpdaterBadge state={updater} />
+            <button
+              className="btn btn-secondary"
+              onClick={checkUpdates}
+              disabled={updater.stage === 'checking'}
+            >
+              <MIcon name="refresh" size={14} />
+              {updater.stage === 'checking' ? 'Checking…' : 'Check updates'}
+            </button>
+            {updater.stage === 'ready' && (
+              <button className="btn btn-primary" onClick={installUpdate}>
+                <MIcon name="download_done" size={14} />
+                Install v{updater.version}
+              </button>
+            )}
+            <button className="btn btn-secondary" onClick={exportDiagnostics}>
+              <MIcon name="download" size={14} />
+              Export diagnostics
+            </button>
+          </>
         }
       />
 
-      <div className="card p-5 mb-4">
-        <div className="flex items-center gap-2 mb-3">
-          <MIcon name="system_update" size={16} className="text-accent" />
-          <div className="font-semibold text-text">App updates</div>
-          <div className="flex-1" />
-          <UpdaterBadge state={updater} />
-        </div>
-        <p className="text-sm text-text-muted mb-3">
-          The app checks for new releases on launch and can download them in the background.
-        </p>
-        <div className="flex items-center gap-2">
-          <button className="btn-secondary" onClick={checkUpdates} disabled={updater.stage === 'checking'}>
-            <MIcon name="refresh" size={14} />
-            {updater.stage === 'checking' ? 'Checking…' : 'Check for updates'}
-          </button>
-          {updater.stage === 'ready' && (
-            <button className="btn-primary" onClick={installUpdate}>
-              <MIcon name="download_done" size={14} />
-              Install v{updater.version} now
-            </button>
-          )}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0 overflow-auto">
         <HelpCard
           icon="laptop_mac"
           title="Running a local node"
@@ -77,22 +72,27 @@ export function Help() {
         <HelpCard
           icon="cloud"
           title="Remote deployment (SSH)"
-          body="Paste your VPS IP, SSH username, and key or password. The app SSHs in, installs Docker if missing, builds the sentinel-dvpnx + sentinelhub images, seeds the node's keyring with an app-generated mnemonic, and starts the container."
+          body="Paste your VPS IP, SSH username, and key or password. The app SSHs in, installs Docker if missing, builds the sentinel-dvpnx + sentinelhub images, seeds the node's keyring, and starts the container."
         />
         <HelpCard
           icon="vpn_key"
           title="Where are keys kept?"
-          body="The app wallet mnemonic is encrypted with your OS keychain (Electron safeStorage). Each deployed node has its own operator mnemonic shown to you exactly once during deploy, and — by default — backed up encrypted inside the app so node-level withdrawals and pricing updates work without SSH."
+          body="The app wallet mnemonic is encrypted with your OS keychain (Electron safeStorage). Each deployed node has its own operator mnemonic, shown once during deploy and backed up encrypted inside the app."
+        />
+        <HelpCard
+          icon="restart_alt"
+          title="Lost your mnemonic?"
+          body="If the app keychain is corrupted or you reinstall on a new machine, you can recover via Wallet Setup → Use Existing Wallet and paste your 12–24-word recovery phrase. The phrase is the only way back, so store it offline. Per-node operator keys are app-only and rebuilt by re-deploying."
         />
         <HelpCard
           icon="price_change"
           title="Updating prices"
-          body="Node Details → click 'Pricing' to broadcast a MsgUpdateNodeDetails. Only works if the app has the encrypted backup of the node's mnemonic (kept by default)."
+          body="Node Details → 'Edit pricing' broadcasts a MsgUpdateNodeDetails. Works if the app has the encrypted backup of the node's mnemonic."
         />
         <HelpCard
           icon="account_balance_wallet"
-          title="Withdrawing node rewards"
-          body="Rewards land directly in each node's operator balance on-chain. Click 'Withdraw to app wallet' on Node Details to broadcast a MsgSend from the node's key (via the encrypted backup) without needing SSH."
+          title="Withdrawing rewards"
+          body="Rewards land in each node's operator balance on-chain. 'Withdraw' on Node Details broadcasts a MsgSend from the node's key without SSH."
         />
         <HelpCard
           icon="keyboard"
@@ -102,7 +102,7 @@ export function Help() {
         <HelpCard
           icon="bug_report"
           title="Reporting issues"
-          body="Export diagnostics (button above) and open an issue on sentinel-official/sentinel-dvpnx or the Sentinel Discord. The zip contains sanitized state + events + logs; mnemonics and SSH credentials are never included."
+          body="Export diagnostics (button above) and open an issue on sentinel-official/sentinel-dvpnx or the Sentinel Discord. The zip is sanitized, with no mnemonics or SSH credentials."
         />
       </div>
     </div>
@@ -114,35 +114,44 @@ function UpdaterBadge({ state }: { state: UpdaterState }) {
     state.stage === 'idle'
       ? 'Idle'
       : state.stage === 'checking'
-      ? 'Checking…'
-      : state.stage === 'downloading'
-      ? `Downloading ${state.percent ?? 0}%`
-      : state.stage === 'ready'
-      ? `v${state.version} ready`
-      : state.stage === 'up-to-date'
-      ? 'Up to date'
-      : state.stage === 'error'
-      ? 'Error'
-      : state.stage;
+        ? 'Checking…'
+        : state.stage === 'downloading'
+          ? `Downloading ${state.percent ?? 0}%`
+          : state.stage === 'ready'
+            ? `v${state.version} ready`
+            : state.stage === 'up-to-date'
+              ? 'Up to date'
+              : state.stage === 'error'
+                ? 'Error'
+                : state.stage;
   const cls =
     state.stage === 'ready'
-      ? 'chip-ok'
+      ? 'chip chip-success'
       : state.stage === 'error'
-      ? 'chip-err'
-      : state.stage === 'downloading' || state.stage === 'checking'
-      ? 'chip-warn'
-      : 'chip-muted';
+        ? 'chip chip-danger'
+        : state.stage === 'downloading' || state.stage === 'checking'
+          ? 'chip chip-warn'
+          : 'chip';
   return <span className={cls}>{label}</span>;
 }
 
 function HelpCard({ icon, title, body }: { icon: string; title: string; body: string }) {
   return (
-    <div className="card p-5">
-      <div className="flex items-center gap-2 mb-1.5">
-        <MIcon name={icon} size={16} className="text-accent" />
-        <div className="font-semibold text-text">{title}</div>
+    <div className="card col-span-12 md:col-span-6 lg:col-span-4">
+      <div className="card-body" style={{ padding: '12px 14px' }}>
+        <div className="flex items-center gap-2 mb-1.5">
+          <MIcon name={icon} size={14} style={{ color: 'var(--accent)' }} />
+          <div className="text-[13px] font-semibold" style={{ color: 'var(--text)' }}>
+            {title}
+          </div>
+        </div>
+        <p
+          className="text-[12px] leading-snug"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          {body}
+        </p>
       </div>
-      <p className="text-sm text-text-muted leading-relaxed">{body}</p>
     </div>
   );
 }

@@ -1,0 +1,432 @@
+import { useState } from 'react';
+import { PageHeader } from '../components/PageHeader';
+import { MIcon } from '../components/MIcon';
+import { useApp } from '../store/app';
+import { ProtocolTiles } from './DeployLocal';
+import type {
+  SSHCredentials,
+  SSHTestResult,
+  VpnServiceType,
+} from '../../../shared/types';
+
+export function DeploySsh() {
+  const { navigate, pushToast } = useApp();
+  const [authMode, setAuthMode] = useState<'key' | 'password'>('key');
+  const [form, setForm] = useState<SSHCredentials>({
+    host: '',
+    port: 22,
+    username: 'root',
+  });
+  const [privateKey, setPrivateKey] = useState('');
+  const [passphrase, setPassphrase] = useState('');
+  const [password, setPassword] = useState('');
+
+  const [moniker, setMoniker] = useState(
+    `dvpn-${Math.random().toString(36).slice(2, 6)}`,
+  );
+  const [service, setService] = useState<VpnServiceType>('wireguard');
+  const [nodePort, setNodePort] = useState(7777);
+  const [gigabytePrice, setGigabytePrice] = useState('0.05');
+  const [hourlyPrice, setHourlyPrice] = useState('0.001');
+  const [remoteUrl, setRemoteUrl] = useState('');
+
+  const [testing, setTesting] = useState(false);
+  const [result, setResult] = useState<SSHTestResult | null>(null);
+  const [deploying, setDeploying] = useState(false);
+
+  const nodePortValid =
+    Number.isInteger(nodePort) && nodePort >= 1024 && nodePort <= 65535;
+  const nodePortError = !Number.isInteger(nodePort)
+    ? 'Port must be a whole number.'
+    : nodePort < 1024 || nodePort > 65535
+      ? 'Port must be between 1024 and 65535.'
+      : null;
+
+  const gbPriceNum = Number(gigabytePrice);
+  const hrPriceNum = Number(hourlyPrice);
+  const gbPriceOver = Number.isFinite(gbPriceNum) && gbPriceNum > 80;
+  const hrPriceOver = Number.isFinite(hrPriceNum) && hrPriceNum > 80;
+  const priceOverNetwork = gbPriceOver || hrPriceOver;
+
+  const creds = (): SSHCredentials => ({
+    ...form,
+    port: Number(form.port) || 22,
+    privateKey: authMode === 'key' ? privateKey : undefined,
+    passphrase: authMode === 'key' && passphrase ? passphrase : undefined,
+    password: authMode === 'password' ? password : undefined,
+  });
+
+  const runTest = async () => {
+    setResult(null);
+    setTesting(true);
+    try {
+      const r = await window.api.ssh.test(creds());
+      setResult(r);
+      if (r.ok)
+        pushToast({
+          title: 'SSH works',
+          body: `${r.latencyMs}ms · ${r.osInfo}`,
+          tone: 'success',
+        });
+      else pushToast({ title: 'SSH failed', body: r.message, tone: 'error' });
+    } catch (e) {
+      setResult({ ok: false, message: (e as Error).message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const startDeploy = async () => {
+    setDeploying(true);
+    try {
+      const { jobId } = await window.api.deploy.start({
+        target: 'remote',
+        moniker: moniker.trim(),
+        serviceType: service,
+        port: nodePort,
+        gigabytePriceDVPN: Number(gigabytePrice) || 0,
+        hourlyPriceDVPN: Number(hourlyPrice) || 0,
+        remoteUrl:
+          remoteUrl
+            .trim()
+            .replace(/^[a-z]+:\/\//i, '')
+            .replace(/\/+$/, '') || undefined,
+        ssh: creds(),
+      });
+      navigate({ name: 'progress', jobId, moniker: moniker.trim(), origin: 'ssh' });
+    } catch (e) {
+      pushToast({
+        title: 'Could not start deploy',
+        body: (e as Error).message,
+        tone: 'error',
+      });
+    } finally {
+      setDeploying(false);
+    }
+  };
+
+  const ready =
+    form.host.trim() &&
+    form.username.trim() &&
+    moniker.trim().length >= 3 &&
+    nodePortValid &&
+    (authMode === 'key' ? privateKey.trim() : password.length > 0);
+
+  return (
+    <div className="flex flex-col h-full min-h-0 gap-3">
+      <PageHeader
+        title="Deploy SSH"
+        subtitle="Connect a VPS via SSH. Ubuntu / Debian supported out of the box."
+        right={
+          <div className="flex items-center gap-1 p-0.5 rounded-md" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{ pointerEvents: 'none' }}
+              title="Single host"
+            >
+              <MIcon name="dns" size={14} /> Single host
+            </button>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => navigate({ name: 'deploy-ssh-batch' })}
+              title="Deploy to many hosts in one go"
+            >
+              <MIcon name="grid_view" size={14} /> Batch
+            </button>
+          </div>
+        }
+      />
+
+      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
+        <div className="card col-span-12 lg:col-span-8 flex flex-col min-h-0 overflow-hidden">
+          <div className="card-header">
+            <div className="card-title flex items-center gap-2">
+              <MIcon name="security" size={14} />
+              SSH connection
+            </div>
+          </div>
+          <div className="card-body flex flex-col gap-2 flex-1 min-h-0">
+            <div className="grid grid-cols-12 gap-2.5">
+              <div className="col-span-7">
+                <div className="field-label">Target host</div>
+                <input
+                  value={form.host}
+                  onChange={(e) => setForm({ ...form, host: e.target.value })}
+                  placeholder="50.115.10.100 or node.example.com"
+                  className="field-input mono-inline"
+                />
+              </div>
+              <div className="col-span-2">
+                <div className="field-label">Port</div>
+                <input
+                  value={form.port}
+                  onChange={(e) =>
+                    setForm({ ...form, port: Number(e.target.value) || 22 })
+                  }
+                  type="number"
+                  className="field-input"
+                />
+              </div>
+              <div className="col-span-3">
+                <div className="field-label">Username</div>
+                <input
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                  placeholder="root"
+                  className="field-input mono-inline"
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex gap-2 mb-1.5">
+                <button
+                  className={`btn flex-1 ${authMode === 'key' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setAuthMode('key')}
+                >
+                  <MIcon name="key" size={14} /> SSH key
+                </button>
+                <button
+                  className={`btn flex-1 ${authMode === 'password' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setAuthMode('password')}
+                >
+                  <MIcon name="password" size={14} /> Password
+                </button>
+              </div>
+
+              {authMode === 'key' ? (
+                <div className="flex flex-col gap-1.5">
+                  <textarea
+                    rows={2}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    value={privateKey}
+                    onChange={(e) => setPrivateKey(e.target.value)}
+                    className="field-input mono-inline text-xs"
+                  />
+                  <input
+                    value={passphrase}
+                    onChange={(e) => setPassphrase(e.target.value)}
+                    type="password"
+                    placeholder="Passphrase (optional)"
+                    className="field-input"
+                  />
+                </div>
+              ) : (
+                <input
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  type="password"
+                  placeholder="SSH password"
+                  className="field-input"
+                />
+              )}
+            </div>
+
+            <div>
+              <div className="grid grid-cols-12 gap-2">
+                <div className="col-span-5">
+                  <div className="field-label">Moniker</div>
+                  <input
+                    value={moniker}
+                    onChange={(e) => setMoniker(e.target.value)}
+                    className="field-input mono-inline"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <div className="field-label">Port</div>
+                  <input
+                    value={nodePort}
+                    onChange={(e) => setNodePort(Number(e.target.value))}
+                    type="number"
+                    className="field-input"
+                    aria-invalid={!nodePortValid}
+                  />
+                </div>
+                <div className="col-span-5">
+                  <div className="field-label">
+                    Public URL{' '}
+                    <span style={{ color: 'var(--text-dim)' }}>(optional)</span>
+                  </div>
+                  <input
+                    value={remoteUrl}
+                    onChange={(e) => setRemoteUrl(e.target.value)}
+                    placeholder={`${form.host || 'host'}:${nodePort}`}
+                    className="field-input mono-inline"
+                  />
+                </div>
+                {nodePortError && (
+                  <div
+                    className="col-span-12 text-[11px] -mt-1"
+                    style={{ color: 'var(--red)' }}
+                  >
+                    {nodePortError}
+                  </div>
+                )}
+                <div className="col-span-12">
+                  <div className="field-label">Protocol</div>
+                  <ProtocolTiles value={service} onChange={setService} />
+                </div>
+                <div className="col-span-6">
+                  <div className="field-label">$P2P / GB</div>
+                  <input
+                    value={gigabytePrice}
+                    onChange={(e) => setGigabytePrice(e.target.value)}
+                    type="number"
+                    step="0.0001"
+                    min="0.0001"
+                    max="80"
+                    className="field-input"
+                    aria-invalid={gbPriceOver}
+                  />
+                </div>
+                <div className="col-span-6">
+                  <div className="field-label">$P2P / hour</div>
+                  <input
+                    value={hourlyPrice}
+                    onChange={(e) => setHourlyPrice(e.target.value)}
+                    type="number"
+                    step="0.0001"
+                    min="0.0001"
+                    max="80"
+                    className="field-input"
+                    aria-invalid={hrPriceOver}
+                  />
+                </div>
+                {priceOverNetwork && (
+                  <div className="col-span-12">
+                    <div className="callout callout-warn text-xs flex items-start gap-2">
+                      <MIcon name="warning" size={14} />
+                      <span>
+                        Network rules cap pricing at <b>80 $P2P</b> per GB or per hour.
+                        Nodes priced above will be rejected by the chain.
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {result && (
+              <div
+                className={`callout ${result.ok ? 'callout-success' : 'callout-danger'}`}
+              >
+                {result.ok ? (
+                  <>
+                    <span className="font-semibold">Connected.</span>{' '}
+                    {result.latencyMs}ms · {result.osInfo}
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold">Connection failed.</span>{' '}
+                    {result.message}
+                  </>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 mt-auto pt-1">
+              <button
+                className="btn btn-secondary"
+                onClick={runTest}
+                disabled={!ready || testing}
+              >
+                {testing ? 'Testing…' : 'Test connection'}
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={startDeploy}
+                disabled={!ready || deploying || !result?.ok}
+                title={!result?.ok ? 'Test the SSH connection first' : undefined}
+              >
+                {deploying ? 'Starting…' : 'Deploy'}
+                <MIcon name="arrow_forward" size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0 gap-3 overflow-auto">
+          <div className="card flex flex-col overflow-hidden">
+            <div className="card-header">
+              <div className="card-title">What happens next</div>
+            </div>
+            <div className="card-body flex flex-col gap-1.5">
+              <Step index={1} label="SSH + uname/docker probe" />
+              <Step index={2} label="Install Docker if missing" />
+              <Step index={3} label="Build sentinel-dvpnx image" />
+              <Step index={4} label="Init: capture mnemonic + address" />
+              <Step index={5} label="Upload config.toml via SFTP" />
+              <Step index={6} label="docker run --restart=unless-stopped" />
+              <div
+                className="mt-2 pt-2 text-[11px] leading-relaxed flex items-start gap-2"
+                style={{
+                  borderTop: '1px solid var(--border)',
+                  color: 'var(--text-dim)',
+                }}
+              >
+                <MIcon name="lock" size={12} style={{ marginTop: 2, color: 'var(--accent)' }} />
+                Credentials live only in memory. The node's operator key is generated on
+                the remote host and never transmitted.
+              </div>
+            </div>
+          </div>
+
+          <CurrentRules />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CurrentRules() {
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div className="card-title">Current rules</div>
+      </div>
+      <div
+        className="card-body flex flex-col gap-2 text-xs"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        <Bullet>Node should be active and healthy.</Bullet>
+        <Bullet>Node should not be behind CGNAT.</Bullet>
+        <Bullet>Max price should be 80 $P2P per hour.</Bullet>
+        <Bullet>Maximum nodes per country: 300.</Bullet>
+        <Bullet>Maximum nodes per city: 20.</Bullet>
+        <Bullet>Maximum nodes per ASN: 50.</Bullet>
+      </div>
+    </div>
+  );
+}
+
+function Bullet({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-2">
+      <MIcon
+        name="check_circle"
+        size={14}
+        style={{ marginTop: 2, color: 'var(--green)' }}
+      />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function Step({ index, label }: { index: number; label: string }) {
+  return (
+    <div className="flex items-start gap-2">
+      <div
+        className="h-5 w-5 rounded-full text-[10px] grid place-items-center flex-shrink-0 font-semibold"
+        style={{
+          background: 'color-mix(in srgb, var(--accent) 20%, transparent)',
+          color: 'var(--accent)',
+        }}
+      >
+        {index}
+      </div>
+      <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+        {label}
+      </div>
+    </div>
+  );
+}
