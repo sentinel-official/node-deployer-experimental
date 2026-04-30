@@ -29,6 +29,7 @@
 import { BrowserWindow, app } from 'electron';
 import net from 'node:net';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { IPC, type CliClientKind, type CliServerState, type CliStreamEvent } from '../../shared/types';
@@ -129,8 +130,16 @@ async function writeDiscovery(): Promise<void> {
       null,
       2,
     ),
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   );
+  // writeFile mode is only honoured on file *create*; tighten unconditionally.
+  if (process.platform !== 'win32') {
+    try {
+      fsSync.chmodSync(file, 0o600);
+    } catch {
+      /* ignore */
+    }
+  }
   discoveryPath = file;
 }
 
@@ -159,7 +168,9 @@ export async function startCliServer(): Promise<CliServerState> {
   // On unix, stale socket file would block bind.
   if (process.platform !== 'win32') {
     try {
-      await fs.mkdir(path.dirname(endpoint), { recursive: true });
+      // 0o700 on the parent so peers can't enumerate the socket name.
+      await fs.mkdir(path.dirname(endpoint), { recursive: true, mode: 0o700 });
+      await fs.chmod(path.dirname(endpoint), 0o700).catch(() => undefined);
       await fs.unlink(endpoint);
     } catch {
       /* not present */
@@ -174,6 +185,16 @@ export async function startCliServer(): Promise<CliServerState> {
     });
     s.listen(endpoint as string, () => {
       server = s;
+      // On Unix, lock the socket inode to the current user. The default
+      // umask leaves it world-connectable; without this anyone on the
+      // same box could call wallet.send / nodes.withdraw / etc.
+      if (process.platform !== 'win32') {
+        try {
+          fsSync.chmodSync(endpoint as string, 0o600);
+        } catch (err) {
+          log.warn('cli socket chmod failed', { err: String(err) });
+        }
+      }
       resolve();
     });
   }).catch(async (err) => {
@@ -238,11 +259,27 @@ interface PendingClient {
   buf: string;
 }
 
+// Hard cap on the per-connection line buffer. A peer that opens the
+// pipe and never sends '\n' would otherwise consume unbounded memory
+// (trivial local DoS). 1 MiB is well above any legitimate CLI line.
+const CLI_LINE_BUFFER_MAX = 1 * 1024 * 1024;
+
 function handleConnection(socket: net.Socket): void {
   const meta: PendingClient = { client: null, buf: '' };
 
   socket.on('data', (chunk) => {
     meta.buf += chunk.toString('utf8');
+    if (meta.buf.length > CLI_LINE_BUFFER_MAX) {
+      try {
+        socket.write(
+          JSON.stringify({ type: 'result', ok: false, error: 'line buffer overflow' }) + '\n',
+        );
+      } catch {
+        /* ignore */
+      }
+      socket.destroy();
+      return;
+    }
     let nl: number;
     while ((nl = meta.buf.indexOf('\n')) >= 0) {
       const line = meta.buf.slice(0, nl);
@@ -354,16 +391,20 @@ async function handleLine(
     broadcastEvent({
       source: meta.client ?? 'shell',
       kind: 'input',
-      text: `$ ${cmdLine}`,
+      text: `$ ${scrubSecrets(cmdLine)}`,
     });
     const result = await runCommand(cmdLine);
     if (result.ok) {
-      broadcastEvent({ source: meta.client ?? 'shell', kind: 'ok', text: result.text });
+      broadcastEvent({
+        source: meta.client ?? 'shell',
+        kind: 'ok',
+        text: scrubSecrets(result.text),
+      });
     } else {
       broadcastEvent({
         source: meta.client ?? 'shell',
         kind: 'err',
-        text: result.error ?? 'Unknown error',
+        text: scrubSecrets(result.error ?? 'Unknown error'),
       });
     }
     socket.write(JSON.stringify({ type: 'result', ...result }) + '\n');
@@ -395,18 +436,56 @@ export async function runFromApp(line: string): Promise<RunResult> {
       error: `CLI is held by ${activeHolder}. Disconnect them to use the in-app prompt.`,
     };
   }
-  broadcastEvent({ source: 'app', kind: 'input', text: `$ ${line}` });
+  broadcastEvent({ source: 'app', kind: 'input', text: `$ ${scrubSecrets(line)}` });
   const result = await runCommand(line);
   if (result.ok) {
-    broadcastEvent({ source: 'app', kind: 'ok', text: result.text });
+    broadcastEvent({ source: 'app', kind: 'ok', text: scrubSecrets(result.text) });
   } else {
     broadcastEvent({
       source: 'app',
       kind: 'err',
-      text: result.error ?? 'Unknown error',
+      text: scrubSecrets(result.error ?? 'Unknown error'),
     });
   }
   return result;
+}
+
+/**
+ * Replace the value of any secret-bearing CLI flag (and the values right
+ * after them in JSON-ish blobs) with `***` before broadcasting to other
+ * connected watchers. Watchers must never see another holder's secrets.
+ *
+ * Patterns covered:
+ *   --mnemonic "abandon abandon …"
+ *   --mnemonic=abandon
+ *   --password ____
+ *   --privateKey/-PrivateKey/-private_key/-passphrase/-seed/-secret …
+ *   "mnemonic":"…"  (JSON forms)
+ */
+const SECRET_FLAGS = [
+  'mnemonic',
+  'password',
+  'privatekey',
+  'private-key',
+  'private_key',
+  'passphrase',
+  'seed',
+  'secret',
+];
+
+function scrubSecrets(text: string): string {
+  if (!text) return text;
+  let out = text;
+  for (const flag of SECRET_FLAGS) {
+    // --flag=VALUE or --flag VALUE  (case-insensitive, single or no leading dash)
+    out = out.replace(
+      new RegExp(`(--?${flag})(\\s*[= ]\\s*)(?:"[^"]*"|'[^']*'|\\S+)`, 'gi'),
+      '$1$2***',
+    );
+    // JSON: "flag":"value"
+    out = out.replace(new RegExp(`("${flag}"\\s*:\\s*)("[^"]*"|'[^']*')`, 'gi'), '$1"***"');
+  }
+  return out;
 }
 
 export function isCliServerRunning(): boolean {

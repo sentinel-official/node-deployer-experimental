@@ -178,7 +178,7 @@ export interface DockerHealth {
 export async function dockerHealth(): Promise<DockerHealth> {
   try {
     const c = await getClient();
-    const info = await c.version();
+    const info = await withDockerTimeout(() => c.version(), 5_000, 'version');
     return { reachable: true, version: info.Version };
   } catch (err) {
     const e = err as Error & { reason?: DockerUnreachableReason; desktop?: DockerDesktopStatus };
@@ -334,10 +334,34 @@ export async function ensureImage(
       } as Docker.ImageBuildOptions & { version?: '1' | '2' },
     );
 
+    // Hard ceiling so a wedged BuildKit doesn't hang the deploy forever.
+    // 15 minutes is enough for a cold build on slow networks; a healthy
+    // build on a warm cache finishes in well under a minute. If we hit
+    // this we tear down the build stream so dockerode releases the pipe.
+    const BUILD_TIMEOUT_MS = 15 * 60 * 1000;
+    let buildTimer: NodeJS.Timeout | null = null;
     await new Promise<void>((resolve, reject) => {
+      buildTimer = setTimeout(() => {
+        try {
+          (stream as NodeJS.ReadableStream & { destroy?: (err?: Error) => void }).destroy?.(
+            new Error('build timeout'),
+          );
+        } catch {
+          /* ignore */
+        }
+        reject(
+          new Error(
+            `Image build of ${tag} timed out after ${BUILD_TIMEOUT_MS / 60_000} minutes. ` +
+              `BuildKit may be wedged — restart Docker Desktop and try again.`,
+          ),
+        );
+      }, BUILD_TIMEOUT_MS);
       c.modem.followProgress(
         stream,
-        (err) => (err ? reject(err) : resolve()),
+        (err) => {
+          if (buildTimer) clearTimeout(buildTimer);
+          err ? reject(err) : resolve();
+        },
         (evt: { stream?: string; error?: string }) => {
           if (evt.error) onLog(`[docker] ${evt.error}`);
           if (evt.stream) {
@@ -378,6 +402,42 @@ export async function ensureImage(
 // Container lifecycle for sentinel-dvpnx nodes
 // ---------------------------------------------------------------------------
 
+/**
+ * Race a promise against a hard timeout. On Windows + Docker Desktop the
+ * named-pipe transport occasionally wedges mid-call (a half-open response
+ * after a Desktop background restart, OS update, or WSL2 hiccup). Without
+ * an outer ceiling, dockerode just sits on the hung pipe forever and the
+ * deploy stalls at "Starting node container" or "Preparing node image".
+ * Every long-running primitive (start/stop/remove/create) goes through
+ * here so the deploy fails with a specific, actionable message instead.
+ */
+export async function withDockerTimeout<T>(
+  op: () => Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `Docker operation '${label}' timed out after ${Math.round(ms / 1000)}s. ` +
+            `The daemon may be wedged — restart Docker Desktop and try again.`,
+        ),
+      );
+    }, ms);
+    op().then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export interface RunNodeOptions {
   nodeId: string;
   hostDataDir: string; // mounted to /root/.sentinel-dvpnx
@@ -395,52 +455,60 @@ export async function runNode(opts: RunNodeOptions): Promise<string> {
   const c = await getClient();
   const name = containerName(opts.nodeId);
 
-  // Remove any previous container with the same name (stale from a prior deploy).
+  // Remove any previous container with the same name (stale from a prior
+  // deploy). Each step gets its own timeout — a hung daemon can wedge any
+  // of inspect/stop/remove independently, and a redeploy that sits forever
+  // on cleanup is the worst kind of failure (no error to act on).
   try {
     const existing = c.getContainer(name);
-    await existing.inspect();
+    await withDockerTimeout(() => existing.inspect(), 15_000, 'inspect previous container');
     try {
-      await existing.stop();
+      await withDockerTimeout(() => existing.stop(), 30_000, 'stop previous container');
     } catch {
       /* not running */
     }
-    await existing.remove();
+    await withDockerTimeout(() => existing.remove(), 15_000, 'remove previous container');
   } catch {
     /* none exists */
   }
 
   await fs.mkdir(opts.hostDataDir, { recursive: true });
 
-  const container = await c.createContainer({
-    name,
-    Image: opts.imageTag,
-    Cmd: opts.cmd ?? ['start'],
-    Tty: false,
-    AttachStdout: true,
-    AttachStderr: true,
-    HostConfig: {
-      RestartPolicy: { Name: 'unless-stopped' },
-      Binds: [`${opts.hostDataDir}:/root/.sentinel-dvpnx`],
-      CapAdd: ['NET_ADMIN', 'NET_RAW'],
-      CapDrop: ['ALL'],
-      Devices: [
-        {
-          PathOnHost: '/dev/net/tun',
-          PathInContainer: '/dev/net/tun',
-          CgroupPermissions: 'rwm',
+  const container = await withDockerTimeout(
+    () =>
+      c.createContainer({
+        name,
+        Image: opts.imageTag,
+        Cmd: opts.cmd ?? ['start'],
+        Tty: false,
+        AttachStdout: true,
+        AttachStderr: true,
+        HostConfig: {
+          RestartPolicy: { Name: 'unless-stopped' },
+          Binds: [`${opts.hostDataDir}:/root/.sentinel-dvpnx`],
+          CapAdd: ['NET_ADMIN', 'NET_RAW'],
+          CapDrop: ['ALL'],
+          Devices: [
+            {
+              PathOnHost: '/dev/net/tun',
+              PathInContainer: '/dev/net/tun',
+              CgroupPermissions: 'rwm',
+            },
+          ],
+          PortBindings: {
+            [`${opts.port}/udp`]: [{ HostPort: String(opts.port) }],
+            [`${opts.port}/tcp`]: [{ HostPort: String(opts.port) }],
+          },
         },
-      ],
-      PortBindings: {
-        [`${opts.port}/udp`]: [{ HostPort: String(opts.port) }],
-        [`${opts.port}/tcp`]: [{ HostPort: String(opts.port) }],
-      },
-    },
-    ExposedPorts: {
-      [`${opts.port}/udp`]: {},
-      [`${opts.port}/tcp`]: {},
-    },
-  });
-  await container.start();
+        ExposedPorts: {
+          [`${opts.port}/udp`]: {},
+          [`${opts.port}/tcp`]: {},
+        },
+      }),
+    30_000,
+    'createContainer',
+  );
+  await withDockerTimeout(() => container.start(), 60_000, 'container.start');
   return container.id;
 }
 
@@ -464,6 +532,20 @@ export async function runOnce(opts: {
   entrypoint?: string[];
   stdin?: string;
   onLog?: (line: string) => void;
+  /**
+   * Hard timeout (ms) after which the container is force-killed and we
+   * resolve with a non-zero exit code. Prevents deploys from hanging
+   * forever when, for example, a stdin attach drops EOF on Windows pipes.
+   * Default: 180_000 (3 minutes) — keygen / init steps should never take
+   * anywhere near that long.
+   */
+  timeoutMs?: number;
+  /**
+   * Optional abort signal. When triggered, the container is force-killed
+   * and the call resolves with exit code -1 — used so `cancelDeploy` can
+   * actually unblock a stuck `container.wait()`.
+   */
+  signal?: AbortSignal;
 }): Promise<{ exitCode: number; output: string }> {
   const c = await getClient();
   await fs.mkdir(opts.hostDataDir, { recursive: true });
@@ -503,17 +585,64 @@ export async function runOnce(opts: {
     stream.write(opts.stdin);
     stream.end();
   }
-  const exit = await container.wait();
+
+  const timeoutMs = opts.timeoutMs ?? 180_000;
+  let timedOut = false;
+  let aborted = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const killContainer = async () => {
+    try {
+      await container.kill();
+    } catch {
+      /* already exited */
+    }
+  };
+  const timeoutPromise = new Promise<{ StatusCode: number }>((resolve) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      void killContainer();
+      resolve({ StatusCode: 124 });
+    }, timeoutMs);
+  });
+  const abortPromise = new Promise<{ StatusCode: number }>((resolve) => {
+    if (!opts.signal) return;
+    if (opts.signal.aborted) {
+      aborted = true;
+      void killContainer();
+      resolve({ StatusCode: -1 });
+      return;
+    }
+    opts.signal.addEventListener('abort', () => {
+      aborted = true;
+      void killContainer();
+      resolve({ StatusCode: -1 });
+    });
+  });
+
+  let exit: { StatusCode?: number };
+  try {
+    exit = (await Promise.race([
+      container.wait(),
+      timeoutPromise,
+      abortPromise,
+    ])) as { StatusCode?: number };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   try {
     await container.remove({ force: true });
   } catch {
     /* already gone */
   }
 
-  return {
-    exitCode: Number(exit?.StatusCode ?? 0),
-    output: stripDockerFrames(Buffer.concat(chunks)),
-  };
+  const code = Number(exit?.StatusCode ?? 0);
+  let output = stripDockerFrames(Buffer.concat(chunks));
+  if (timedOut) {
+    output += `\n[runOnce] timed out after ${Math.round(timeoutMs / 1000)}s — container killed`;
+  } else if (aborted) {
+    output += '\n[runOnce] aborted — container killed';
+  }
+  return { exitCode: code, output };
 }
 
 /** Fetch the last N lines of a container's combined stdout/stderr. */

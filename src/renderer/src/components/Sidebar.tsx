@@ -12,6 +12,7 @@ interface Item {
 const TOP: Item[] = [
   { key: 'overview', label: 'Overview', icon: 'dashboard', route: { name: 'overview' } },
   { key: 'nodes', label: 'My Nodes', icon: 'dns', route: { name: 'nodes' } },
+  { key: 'activity', label: 'Activity', icon: 'history', route: { name: 'activity' } },
   { key: 'deploy-local', label: 'Deploy Local', icon: 'desktop_windows', route: { name: 'deploy-local' } },
   { key: 'deploy-ssh', label: 'Deploy SSH', icon: 'cloud', route: { name: 'deploy-ssh' } },
   { key: 'earnings', label: 'Earnings', icon: 'paid', comingSoon: true },
@@ -21,6 +22,7 @@ const TOP: Item[] = [
 ];
 
 const BOTTOM: Item[] = [
+  { key: 'system', label: 'System', icon: 'memory', route: { name: 'system' } },
   { key: 'settings', label: 'Settings', icon: 'settings', route: { name: 'settings' } },
   { key: 'help', label: 'Help', icon: 'help', route: { name: 'help' } },
 ];

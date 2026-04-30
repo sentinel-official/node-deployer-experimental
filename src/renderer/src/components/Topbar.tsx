@@ -1,7 +1,13 @@
+import { useEffect, useState } from 'react';
 import { useApp } from '../store/app';
 import { fmtDVPN } from '../lib/format';
 import { MIcon } from './MIcon';
 import { useTheme } from '../lib/theme';
+
+// If the backend stops emitting deploy frames for this long, treat the
+// in-flight job as wedged and surface a Cancel button instead of the
+// silent spinning pill.
+const STALE_PROGRESS_MS = 90_000;
 
 export function Topbar() {
   const {
@@ -9,21 +15,33 @@ export function Topbar() {
     refreshWallet,
     settings,
     online,
-    canGoBack,
-    goBack,
     chainHealth,
     progress,
+    progressAt,
     route,
     navigate,
     nodes,
+    clearStuckDeploy,
   } = useApp();
   const [theme, , toggleTheme] = useTheme();
+
+  // Force a re-render every 5s so the staleness pill flips to "stuck" without
+  // needing a new progress frame to arrive.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!progress) return;
+    const t = setInterval(() => setTick((n) => n + 1), 5_000);
+    return () => clearInterval(t);
+  }, [progress]);
 
   const deployActive =
     progress &&
     progress.phase !== 'done' &&
     progress.phase !== 'error' &&
+    progress.phase !== 'cancelled' &&
     route.name !== 'progress';
+  const isStuck =
+    deployActive && progressAt !== null && Date.now() - progressAt > STALE_PROGRESS_MS;
   const activeNode = deployActive
     ? nodes.find((n) => n.id === progress.nodeId)
     : null;
@@ -48,55 +66,78 @@ export function Topbar() {
         background: 'var(--bg)',
       }}
     >
-      <button
-        className={`no-drag btn btn-ghost !p-2 ${canGoBack ? '' : 'opacity-30 pointer-events-none'}`}
-        onClick={goBack}
-        title="Back"
-        aria-label="Back"
-      >
-        <MIcon name="arrow_back" size={18} />
-      </button>
-
       <div className="flex-1" />
 
       {deployActive && (
-        <button
-          className="no-drag flex items-center gap-2 px-3 py-1.5"
-          onClick={() =>
-            navigate({
-              name: 'progress',
-              jobId: progress.jobId,
-              moniker: deployMoniker,
-            })
-          }
-          title={`${progress.message} — click to return`}
-          style={{
-            background: 'var(--accent-dim)',
-            border: '1px solid color-mix(in srgb, var(--accent) 35%, transparent)',
-            borderRadius: 'var(--radius-md)',
-            color: 'var(--text)',
-          }}
-        >
-          <span
-            className="h-1.5 w-1.5 rounded-full"
+        <div className="no-drag flex items-center gap-1">
+          <button
+            className="flex items-center gap-2 px-3 py-1.5"
+            onClick={() =>
+              navigate({
+                name: 'progress',
+                jobId: progress.jobId,
+                moniker: deployMoniker,
+              })
+            }
+            title={
+              isStuck
+                ? `No update for ${Math.round((Date.now() - (progressAt ?? Date.now())) / 1000)}s — click to inspect or use ✕ to clear`
+                : `${progress.message} — click to return`
+            }
             style={{
-              background: 'var(--accent)',
-              animation: 'pulse-dot 1.4s ease-in-out infinite',
+              background: isStuck
+                ? 'color-mix(in srgb, var(--yellow) 18%, transparent)'
+                : 'var(--accent-dim)',
+              border: `1px solid ${
+                isStuck
+                  ? 'color-mix(in srgb, var(--yellow) 45%, transparent)'
+                  : 'color-mix(in srgb, var(--accent) 35%, transparent)'
+              }`,
+              borderRadius: 'var(--radius-md)',
+              color: 'var(--text)',
             }}
-          />
-          <span className="text-[11px] uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
-            Deploying
-          </span>
-          <span className="text-[12px] font-semibold truncate max-w-[140px]">
-            {deployMoniker}
-          </span>
-          <span
-            className="tabular-nums text-[12px] font-semibold"
-            style={{ color: 'var(--accent-bright, var(--accent))' }}
           >
-            {Math.round(progress.percent)}%
-          </span>
-        </button>
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{
+                background: isStuck ? 'var(--yellow)' : 'var(--accent)',
+                animation: isStuck ? 'none' : 'pulse-dot 1.4s ease-in-out infinite',
+              }}
+            />
+            <span
+              className="text-[11px] uppercase tracking-wider"
+              style={{ color: 'var(--text-dim)' }}
+            >
+              {isStuck ? 'Stuck' : 'Deploying'}
+            </span>
+            <span className="text-[12px] font-semibold truncate max-w-[140px]">
+              {deployMoniker}
+            </span>
+            <span
+              className="tabular-nums text-[12px] font-semibold"
+              style={{
+                color: isStuck ? 'var(--yellow)' : 'var(--accent-bright, var(--accent))',
+              }}
+            >
+              {Math.round(progress.percent)}%
+            </span>
+          </button>
+          <button
+            className="flex items-center justify-center"
+            onClick={() => void clearStuckDeploy()}
+            title="Cancel and clear this deploy"
+            style={{
+              width: 28,
+              height: 28,
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              color: 'var(--text-dim)',
+            }}
+          >
+            <MIcon name="close" size={14} />
+          </button>
+        </div>
       )}
 
       {!online && (

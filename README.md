@@ -85,6 +85,24 @@ native modules (`better-sqlite3`, `secp256k1`, `cpu-features`) against the
 Electron ABI. If you later want to run unit tests, run
 `npm run rebuild:node` to rebuild for the system Node ABI.
 
+### End-to-end CLI test (real money)
+
+`tests/e2e/cli-e2e.mjs` drives every CLI command end-to-end against
+mainnet — including a real-money self-send and a real `MsgUpdateNodeDetails`
+broadcast — and verifies each tx on-chain via Sentinel RPC `tx_search`.
+
+```bash
+node tests/e2e/cli-e2e.mjs              # full real-money flow (≤ 0.0015 DVPN total)
+node tests/e2e/cli-e2e.mjs --dry-run    # everything except the two TXs
+node tests/e2e/cli-e2e.mjs --no-deploy  # skip Docker keygen + node lifecycle
+```
+
+Prereqs: app running, CLI server started (in-app CLI screen → **Start**, or
+launch with `SNM_AUTO_START_CLI=1` + the explicit ack token), wallet
+funded with ≥ 0.5 DVPN. See [`docs/e2e-cli-test.md`](./docs/e2e-cli-test.md)
+for the full protocol, on-chain verification details, troubleshooting
+table, and safety knobs.
+
 ### What's real
 
 | Concern | Implementation |

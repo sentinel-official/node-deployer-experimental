@@ -64,24 +64,28 @@ beforeEach(() => {
 describe('WalletSetup', () => {
   it('shows the two choice cards on first render', () => {
     render(<WalletSetup />);
-    expect(screen.getByText(/Create New Wallet/i)).toBeDefined();
-    expect(screen.getByText(/Use Existing Wallet/i)).toBeDefined();
+    expect(screen.getByText(/Create new wallet/i)).toBeDefined();
+    expect(screen.getByText(/Restore existing wallet/i)).toBeDefined();
   });
 
   it('creates a wallet and requires backup confirmation before continue', async () => {
     const user = userEvent.setup();
     render(<WalletSetup />);
 
-    // Button label text is spread across an MIcon span + text; filter by
-    // a substring the icon text can't match.
+    // The "Create wallet" CTA is one of multiple buttons on screen — find
+    // the one whose accessible label matches the current copy.
     const buttons = screen.getAllByRole('button');
-    const initBtn = buttons.find((b) => /Initialize Secure Vault/.test(b.textContent ?? ''));
+    const initBtn = buttons.find((b) =>
+      /Create wallet/i.test(b.textContent ?? '') && !/Restore/i.test(b.textContent ?? ''),
+    );
     expect(initBtn).toBeDefined();
     await user.click(initBtn!);
 
-    // Mnemonic is revealed; Continue should be disabled until the checkbox is ticked.
-    const mnemonicText = await screen.findByText(FAKE_MNEMONIC);
-    expect(mnemonicText).toBeDefined();
+    // Mnemonic is revealed as 24 individual word tiles; assert the first
+    // word renders. Continue is disabled until the backup checkbox ticks.
+    const firstWord = FAKE_MNEMONIC.split(/\s+/)[0];
+    const wordEl = await screen.findByText(firstWord);
+    expect(wordEl).toBeDefined();
 
     const continueBtn = screen.getByRole('button', { name: /Continue/i });
     expect(continueBtn.getAttribute('disabled')).not.toBeNull();

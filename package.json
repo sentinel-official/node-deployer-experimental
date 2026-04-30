@@ -17,6 +17,8 @@
     "test": "vitest run",
     "test:unit": "vitest run tests/unit",
     "test:watch": "vitest",
+    "test:e2e": "node tests/e2e/cli-e2e.mjs",
+    "test:universal": "node tests/e2e/universal.mjs",
     "rebuild:electron": "electron-builder install-app-deps",
     "rebuild:node": "npm rebuild better-sqlite3",
     "package:dir": "electron-vite build && electron-builder --dir",

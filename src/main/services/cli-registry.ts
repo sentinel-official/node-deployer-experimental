@@ -31,6 +31,7 @@ import {
   type VpnServiceType,
 } from '../../shared/types';
 import { testSSHConnection } from './ssh';
+import { forgetHostKey } from './host-keys';
 import {
   startDeploy,
   cancelDeploy,
@@ -63,7 +64,6 @@ import {
 import { listEvents } from './events';
 import { getSettings, updateSettings } from './settings';
 import {
-  dockerHealth,
   startDockerDesktop,
   resetDockerClient,
   dockerOverview,
@@ -72,6 +72,7 @@ import {
   quitDockerDesktop,
   forceQuitDockerDesktop,
 } from './docker';
+import { buildLocalSystemReport } from './system-report';
 import { healthAll, invalidateHealthCache } from './sentinel-client';
 import { readStore, writeStore } from './store';
 
@@ -187,45 +188,40 @@ const isMetricsWindow = (s: string): s is MetricsWindow =>
 // ─── helpers needed for main-side execution ──────────────────────────────────
 
 async function reportLocalSystem(): Promise<LocalSystemReport> {
-  const platform = os.platform();
-  const memMb = Math.round(os.totalmem() / (1024 * 1024));
-  const osLabel =
-    platform === 'darwin'
-      ? `macOS ${os.release()}`
-      : platform === 'linux'
-        ? `Linux ${os.release()}`
-        : platform === 'win32'
-          ? `Windows ${os.release()}`
-          : `${platform} ${os.release()}`;
-  const health = await dockerHealth();
-  return {
-    osCompatible: ['darwin', 'linux', 'win32'].includes(platform),
-    osLabel,
-    memoryMb: memMb,
-    memoryOk: memMb >= 2048,
-    diskFreeGb: 50,
-    diskOk: true,
-    dockerInstalled: health.reachable || (health.desktop?.installed ?? false),
-    dockerVersion: health.version,
-    dockerReachable: health.reachable,
-    dockerError: health.error,
-    dockerReason: health.reason,
-    dockerDesktop: health.desktop,
-  };
+  return buildLocalSystemReport();
 }
 
 async function exportDiagnosticsToTmp(): Promise<{ ok: boolean; path?: string; error?: string }> {
   // Headless variant of the GUI's exportDiagnostics — writes to a temp path
-  // since we can't show a file dialog from the pipe / agent context.
+  // since we can't show a file dialog from the pipe / agent context. Must
+  // mirror the GUI sanitizer (ipc.ts) so the encrypted-mnemonic blob,
+  // SSH credentials, and other secrets in the raw store NEVER hit disk
+  // via the CLI path.
   const tmpDir = path.join(os.tmpdir(), 'sentinel-dvpn-diagnostics');
   await fs.mkdir(tmpDir, { recursive: true });
   const stamp = new Date().toISOString().split('T')[0];
   const target = path.join(tmpDir, `sentinel-dvpn-diagnostics-${stamp}.zip`);
   try {
     const store = await readStore();
+    const sanitizedStore = {
+      wallet: store.wallet
+        ? { address: store.wallet.address, createdAt: store.wallet.createdAt }
+        : null,
+      nodes: store.nodes.map((n) => ({
+        id: n.id,
+        moniker: n.moniker,
+        target: n.target,
+        status: n.status,
+        operatorAddress: n.operatorAddress,
+        createdAt: n.createdAt,
+        host: n.host,
+        port: n.port,
+      })),
+      eventsLast50: store.events.slice(0, 50),
+    };
     const settings = await getSettings();
     const zip = new AdmZip();
-    zip.addFile('store.json', Buffer.from(JSON.stringify(store, null, 2)));
+    zip.addFile('store.json', Buffer.from(JSON.stringify(sanitizedStore, null, 2)));
     zip.addFile('settings.json', Buffer.from(JSON.stringify(settings, null, 2)));
     zip.writeZip(target);
     return { ok: true, path: target };
@@ -511,6 +507,22 @@ export const MAIN_COMMANDS: MainCliCommand[] = [
       return testSSHConnection(creds);
     },
   },
+  {
+    name: 'ssh.forgetHostKey',
+    group: 'ssh',
+    summary: 'Drop a TOFU-pinned SSH host key (for ephemeral hosts / e2e mocks).',
+    usage: 'ssh.forgetHostKey --host 1.2.3.4 --port 22',
+    args: [
+      { name: 'host', kind: 'flag', required: true, describe: 'IP or hostname.' },
+      { name: 'port', kind: 'flag', describe: 'SSH port (default 22).' },
+    ],
+    exec: async (p) => {
+      const host = requireFlag(p, 'host');
+      const port = numberFlag(p, 'port') ?? 22;
+      await forgetHostKey(host, port);
+      return { ok: true, host, port };
+    },
+  },
 
   // ── deploy ────────────────────────────────────────────────────────────────
   {
@@ -566,22 +578,18 @@ export const MAIN_COMMANDS: MainCliCommand[] = [
     name: 'deploy.status',
     group: 'deploy',
     summary: 'Latest progress frame for a deploy. Omit jobId to list all.',
-    usage: 'deploy.status [<jobId>] [--reveal]',
-    args: [
-      { name: 'jobId', kind: 'positional', describe: 'Optional job id.' },
-      {
-        name: 'reveal',
-        kind: 'flag',
-        describe: 'Include the recovery phrase in the response (redacted by default).',
-      },
-    ],
+    usage: 'deploy.status [<jobId>]',
+    args: [{ name: 'jobId', kind: 'positional', describe: 'Optional job id.' }],
+    // The recovery phrase is always redacted from this endpoint. The
+    // previous `--reveal` flag exposed the operator mnemonic to anyone
+    // with CLI pipe access; reveal must go through the renderer's gated
+    // flow (with confirm) instead.
     exec: (p) => {
       const jobId = p.positional[0];
-      const reveal = p.flags.reveal === true || optionalFlag(p, 'reveal') === 'true';
       const redact = (frame: DeployProgress | null): DeployProgress | null => {
-        if (!frame || reveal) return frame;
+        if (!frame) return frame;
         if (frame.mnemonicForBackup === undefined) return frame;
-        return { ...frame, mnemonicForBackup: '[redacted — pass --reveal to include]' };
+        return { ...frame, mnemonicForBackup: '[redacted — use the in-app reveal flow]' };
       };
       const value = jobId ? redact(getDeployProgress(jobId)) : listDeployProgress().map((f) => redact(f));
       return Promise.resolve(value);

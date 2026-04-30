@@ -9,7 +9,7 @@ import { KIND_ICON } from '../lib/events';
 import type { AppEvent, SendTxResult } from '../../../shared/types';
 
 export function Wallet() {
-  const { wallet, nodes, events, refreshWallet, refreshNodes, confirm, pushToast, logoutWallet } =
+  const { wallet, nodes, events, refreshWallet, refreshNodes, confirm, pushToast, logoutWallet, navigate } =
     useApp();
   const [copied, setCopied] = useState(false);
   const [toAddr, setToAddr] = useState('');
@@ -17,6 +17,13 @@ export function Wallet() {
   const [memo, setMemo] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<SendTxResult | null>(null);
+  const [walletSel, setWalletSel] = useState<string>('app');
+
+  const selectedNode = walletSel === 'app' ? null : nodes.find((n) => n.id === walletSel) ?? null;
+  const viewingOperator = !!selectedNode;
+  const viewAddress = viewingOperator ? selectedNode!.operatorAddress : wallet?.address ?? null;
+  const viewBalance = viewingOperator ? selectedNode!.balanceDVPN : wallet?.balanceDVPN ?? 0;
+  const viewLabel = viewingOperator ? `${selectedNode!.moniker} operator` : 'App wallet';
 
   const walletHistory: AppEvent[] = useMemo(
     () =>
@@ -48,7 +55,7 @@ export function Wallet() {
       : !Number.isFinite(amountNum) || amountNum <= 0
         ? 'Amount must be greater than zero.'
         : amountNum + gasHint > balance
-          ? `Insufficient balance. ${(amountNum + gasHint).toFixed(6)} $P2P required including gas.`
+          ? `Not enough P2P. You need ${fmtDVPN(amountNum + gasHint, 6)} $P2P in total — the amount you want to send plus a small network fee.`
           : null;
   const canSend =
     !busy &&
@@ -58,8 +65,8 @@ export function Wallet() {
     amountNum + gasHint <= balance;
 
   const copy = async () => {
-    if (!wallet?.address) return;
-    await navigator.clipboard.writeText(wallet.address);
+    if (!viewAddress) return;
+    await navigator.clipboard.writeText(viewAddress);
     setCopied(true);
     setTimeout(() => setCopied(false), 1400);
   };
@@ -108,6 +115,21 @@ export function Wallet() {
         subtitle="Send $P2P, monitor transactions, and consolidate rewards from your nodes."
         right={
           <>
+            <select
+              className="field-input"
+              value={walletSel}
+              onChange={(e) => setWalletSel(e.target.value)}
+              style={{ minWidth: 180, fontSize: 12.5, padding: '6px 8px' }}
+              title="Switch wallet view"
+            >
+              <option value="app">App wallet</option>
+              {nodes.length > 0 && <option disabled>──────────</option>}
+              {nodes.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {n.moniker} · {fmtDVPN(n.balanceDVPN)} $P2P
+                </option>
+              ))}
+            </select>
             <button className="btn btn-secondary" onClick={() => void refreshWallet()}>
               <MIcon name="refresh" size={14} />
               Refresh balances
@@ -141,9 +163,9 @@ export function Wallet() {
       <div className="grid grid-cols-12 gap-3">
         <StatCard
           className="col-span-12 md:col-span-4"
-          label="App wallet"
-          value={`${fmtDVPN(wallet?.balanceDVPN ?? 0)} $P2P`}
-          caption={wallet?.address ? shortAddr(wallet.address, 10, 6) : '—'}
+          label={viewLabel}
+          value={`${fmtDVPN(viewBalance)} $P2P`}
+          caption={viewAddress ? shortAddr(viewAddress, 10, 6) : '—'}
           accent="accent"
         />
         <StatCard
@@ -179,14 +201,14 @@ export function Wallet() {
                 borderRadius: 'var(--radius-md)',
               }}
             >
-              {wallet?.address ? (
+              {viewAddress ? (
                 <>
-                  <QRCode value={wallet.address} size={112} />
+                  <QRCode value={viewAddress} size={112} />
                   <div
                     className="mt-3 mono-inline text-[10px] break-all text-center"
                     style={{ color: 'var(--text-muted)' }}
                   >
-                    {wallet.address}
+                    {viewAddress}
                   </div>
                   <button className="btn btn-ghost mt-1 text-xs" onClick={copy}>
                     <MIcon name="content_copy" size={12} /> {copied ? 'Copied' : 'Copy address'}
@@ -213,9 +235,52 @@ export function Wallet() {
           <div className="card-header">
             <div className="card-title flex items-center gap-2">
               <MIcon name="north_east" size={14} style={{ color: 'var(--green)' }} />
-              Send $P2P
+              {viewingOperator ? 'Operator wallet' : 'Send $P2P'}
             </div>
           </div>
+          {viewingOperator ? (
+            <div className="card-body flex flex-col gap-2.5">
+              <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                This is a read-only view of the on-chain balance for the{' '}
+                <b style={{ color: 'var(--text)' }}>{selectedNode!.moniker}</b> operator
+                address. Operator keys are held by sentinel-dvpnx on the host running the
+                node — not by this app — so transfers can't be signed here.
+              </div>
+              <div
+                className="px-3 py-2.5 text-xs flex flex-col gap-1"
+                style={{
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'var(--text-muted)',
+                }}
+              >
+                <div className="flex justify-between">
+                  <span>Operator</span>
+                  <span className="mono-inline" style={{ color: 'var(--text)' }}>
+                    {shortAddr(selectedNode!.operatorAddress, 12, 8)}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Balance</span>
+                  <span style={{ color: 'var(--text)' }}>
+                    {fmtDVPN(selectedNode!.balanceDVPN)} $P2P
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span>Status</span>
+                  <span style={{ color: 'var(--text)' }}>{selectedNode!.status}</span>
+                </div>
+              </div>
+              <button
+                className="btn btn-primary w-full"
+                onClick={() => navigate({ name: 'node-details', id: selectedNode!.id })}
+              >
+                <MIcon name="open_in_new" size={14} />
+                Open node · withdraw rewards
+              </button>
+            </div>
+          ) : (
           <div className="card-body flex flex-col gap-2.5">
             <div>
               <div className="field-label">Recipient address</div>
@@ -322,6 +387,7 @@ export function Wallet() {
               <MIcon name="arrow_forward" size={14} />
             </button>
           </div>
+          )}
         </div>
       </div>
 
@@ -341,7 +407,7 @@ export function Wallet() {
           </div>
         ) : (
           <div className="flex-1 min-h-0 overflow-auto">
-            {walletHistory.map((e, idx) => {
+            {walletHistory.slice(0, 100).map((e, idx) => {
               const Icon = KIND_ICON[e.kind];
               return (
                 <div
@@ -362,8 +428,9 @@ export function Wallet() {
                   </div>
                   <div className="flex-1 min-w-0">
                     <div
-                      className="text-sm font-medium"
+                      className="text-sm font-medium truncate"
                       style={{ color: 'var(--text)' }}
+                      title={e.title}
                     >
                       {e.title}
                     </div>

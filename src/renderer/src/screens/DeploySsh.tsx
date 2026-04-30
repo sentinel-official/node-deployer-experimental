@@ -137,15 +137,15 @@ export function DeploySsh() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        <div className="card col-span-12 lg:col-span-8 flex flex-col min-h-0 overflow-hidden">
+      <div className="grid grid-cols-12 gap-3">
+        <div className="card col-span-12 lg:col-span-8 flex flex-col overflow-hidden">
           <div className="card-header">
             <div className="card-title flex items-center gap-2">
               <MIcon name="security" size={14} />
               SSH connection
             </div>
           </div>
-          <div className="card-body flex flex-col gap-2 flex-1 min-h-0">
+          <div className="card-body flex flex-col gap-2">
             <div className="grid grid-cols-12 gap-2.5">
               <div className="col-span-7">
                 <div className="field-label">Target host</div>
@@ -157,7 +157,7 @@ export function DeploySsh() {
                 />
               </div>
               <div className="col-span-2">
-                <div className="field-label">Port</div>
+                <div className="field-label">SSH port</div>
                 <input
                   value={form.port}
                   onChange={(e) =>
@@ -324,7 +324,7 @@ export function DeploySsh() {
               </div>
             )}
 
-            <div className="flex items-center justify-end gap-2 mt-auto pt-1">
+            <div className="flex items-center justify-end gap-2 pt-1">
               <button
                 className="btn btn-secondary"
                 onClick={runTest}

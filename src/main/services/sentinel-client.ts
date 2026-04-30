@@ -43,6 +43,45 @@ import type { ChainHealth } from '../../shared/types';
 
 const PROBE_TIMEOUT_MS = 4_000;
 const PROBE_CACHE_TTL_MS = 30_000;
+// Hard ceilings on RPC primitives. Without these, a single wedged endpoint
+// in the pool can stall the entire deploy at preflight — Comet38Client.connect
+// has no built-in timeout and will sit on a half-open socket indefinitely.
+const RPC_CONNECT_TIMEOUT_MS = 6_000;
+const RPC_QUERY_TIMEOUT_MS = 8_000;
+const RPC_BROADCAST_TIMEOUT_MS = 60_000;
+
+export async function withRpcTimeout<T>(
+  op: () => Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `RPC '${label}' timed out after ${Math.round(ms / 1000)}s. ` +
+            `The endpoint may be unreachable — check Settings → RPC list.`,
+        ),
+      );
+    }, ms);
+    op().then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+export {
+  RPC_CONNECT_TIMEOUT_MS,
+  RPC_QUERY_TIMEOUT_MS,
+  RPC_BROADCAST_TIMEOUT_MS,
+};
 
 interface CachedHealth {
   ok: boolean;
@@ -62,7 +101,7 @@ export async function pickRPC(): Promise<string> {
   }
   // All unhealthy — return the first one and let the caller surface the failure.
   throw new Error(
-    `No healthy RPC. Tried: ${rpcUrls.join(', ')}. Check your internet connection or update the RPC list in Settings.`,
+    `Could not connect to the Sentinel network. We tried these servers and none responded: ${rpcUrls.join(', ')}. Please check your internet connection, or update the server list in Settings.`,
   );
 }
 
@@ -73,8 +112,16 @@ export async function readClients(): Promise<{
   disconnect: () => void;
 }> {
   const url = await pickRPC();
-  const tm = await Comet38Client.connect(url);
-  const stargate = await StargateClient.create(tm);
+  const tm = await withRpcTimeout(
+    () => Comet38Client.connect(url),
+    RPC_CONNECT_TIMEOUT_MS,
+    `connect ${url}`,
+  );
+  const stargate = await withRpcTimeout(
+    () => StargateClient.create(tm),
+    RPC_CONNECT_TIMEOUT_MS,
+    `stargate.create ${url}`,
+  );
   const sentinel = buildSentinelQueryClient(tm as unknown as AnyTm);
   return {
     stargate,
@@ -97,7 +144,11 @@ export async function signClient(signer: OfflineSigner): Promise<{
 }> {
   const url = await pickRPC();
   // No gasPrice in options — every broadcast passes an explicit StdFee.
-  const client = await SigningSentinelClient.connectWithSigner(url, signer);
+  const client = await withRpcTimeout(
+    () => SigningSentinelClient.connectWithSigner(url, signer),
+    RPC_CONNECT_TIMEOUT_MS,
+    `signClient ${url}`,
+  );
   return {
     client,
     url,
@@ -117,34 +168,47 @@ async function isHealthy(url: string, expectedChainId: string): Promise<boolean>
     return true;
   }
   const start = Date.now();
+  let tm: Comet38Client | null = null;
   try {
-    const tm = await Comet38Client.connect(url);
-    try {
-      const sg = await StargateClient.create(tm);
-      const chainId = await sg.getChainId();
-      const height = await sg.getHeight();
-      if (chainId !== expectedChainId) {
-        healthCache.set(url, {
-          ok: false,
-          at: Date.now(),
-          error: `chain mismatch: ${chainId} vs ${expectedChainId}`,
-          chainId,
-          blockHeight: height,
-          latencyMs: Date.now() - start,
-        });
-        return false;
-      }
+    tm = await withRpcTimeout(
+      () => Comet38Client.connect(url),
+      PROBE_TIMEOUT_MS,
+      `connect ${url}`,
+    );
+    const sg = await withRpcTimeout(
+      () => StargateClient.create(tm!),
+      PROBE_TIMEOUT_MS,
+      `stargate ${url}`,
+    );
+    const chainId = await withRpcTimeout(
+      () => sg.getChainId(),
+      PROBE_TIMEOUT_MS,
+      `chainId ${url}`,
+    );
+    const height = await withRpcTimeout(
+      () => sg.getHeight(),
+      PROBE_TIMEOUT_MS,
+      `height ${url}`,
+    );
+    if (chainId !== expectedChainId) {
       healthCache.set(url, {
-        ok: true,
+        ok: false,
         at: Date.now(),
+        error: `chain mismatch: ${chainId} vs ${expectedChainId}`,
         chainId,
         blockHeight: height,
         latencyMs: Date.now() - start,
       });
-      return true;
-    } finally {
-      tm.disconnect();
+      return false;
     }
+    healthCache.set(url, {
+      ok: true,
+      at: Date.now(),
+      chainId,
+      blockHeight: height,
+      latencyMs: Date.now() - start,
+    });
+    return true;
   } catch (err) {
     log.debug('RPC probe failed', { url, err: (err as Error).message });
     healthCache.set(url, {
@@ -155,8 +219,13 @@ async function isHealthy(url: string, expectedChainId: string): Promise<boolean>
     });
     return false;
   } finally {
-    // Guarantee the probe doesn't hang forever
-    setTimeout(() => undefined, PROBE_TIMEOUT_MS);
+    if (tm) {
+      try {
+        tm.disconnect();
+      } catch {
+        /* already closed */
+      }
+    }
   }
 }
 

@@ -35,6 +35,10 @@ interface Row {
   phase?: DeployPhase;
   percent?: number;
   message?: string;
+  authOverride?: 'key' | 'password';
+  privateKeyOverride?: string;
+  passphraseOverride?: string;
+  passwordOverride?: string;
 }
 
 const TERMINAL_PHASES = new Set<DeployPhase>(['done', 'error', 'cancelled']);
@@ -57,9 +61,18 @@ function applyUrlPattern(pattern: string, host: string, nodePort: number): strin
   return pattern.replace(/\{host\}/g, host).replace(/\{port\}/g, String(nodePort));
 }
 
+// Accept "host", "host:port", or schemed http(s)://host[:port]. Strip
+// scheme + trailing slashes. Reject anything containing a path, query,
+// fragment, whitespace, or non-host characters — those would later be
+// interpolated into the dvpnx --node.remote-addrs flag and the TOML config.
+const REMOTE_URL_HOST_RE = /^[a-zA-Z0-9.\-]{1,253}(?::[0-9]{1,5})?$/;
 function effectiveRemoteUrl(row: Row, pattern: string): string {
-  const raw = row.remoteUrlOverride.trim() || applyUrlPattern(pattern.trim(), row.host, row.nodePort);
-  return raw.replace(/^[a-z]+:\/\//i, '').replace(/\/+$/, '');
+  const raw = (row.remoteUrlOverride.trim() || applyUrlPattern(pattern.trim(), row.host, row.nodePort))
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+  if (!raw) return '';
+  if (!REMOTE_URL_HOST_RE.test(raw)) return '';
+  return raw;
 }
 
 function statusTone(s: RowStatus): { color: string; label: string } {
@@ -78,12 +91,6 @@ function statusTone(s: RowStatus): { color: string; label: string } {
 export function DeploySshBatch() {
   const { navigate, pushToast } = useApp();
 
-  // Shared SSH credentials.
-  const [authMode, setAuthMode] = useState<'key' | 'password'>('key');
-  const [privateKey, setPrivateKey] = useState('');
-  const [passphrase, setPassphrase] = useState('');
-  const [password, setPassword] = useState('');
-
   // Shared deploy params.
   const [service, setService] = useState<VpnServiceType>('wireguard');
   const [gigabytePrice, setGigabytePrice] = useState('0.05');
@@ -92,8 +99,11 @@ export function DeploySshBatch() {
 
   const [rows, setRows] = useState<Row[]>([newRow()]);
   const [paste, setPaste] = useState('');
-  const [showCli, setShowCli] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [paramsOpen, setParamsOpen] = useState(true);
+  const [cliOpen, setCliOpen] = useState(false);
   const [running, setRunning] = useState(false);
+  const [credsRowId, setCredsRowId] = useState<string | null>(null);
   const cancelRef = useRef(false);
 
   // Subscribe to deploy progress and merge into the matching row.
@@ -111,17 +121,34 @@ export function DeploySshBatch() {
     return () => { try { unsub?.(); } catch { /* noop */ } };
   }, []);
 
-  const sharedCreds = (host: string, port: number, username: string): SSHCredentials => ({
-    host,
-    port,
-    username,
-    privateKey: authMode === 'key' ? privateKey : undefined,
-    passphrase: authMode === 'key' && passphrase ? passphrase : undefined,
-    password: authMode === 'password' ? password : undefined,
-  });
+  const credsForRow = (row: Row): SSHCredentials => {
+    const host = row.host.trim();
+    const username = row.username.trim();
+    const port = row.port;
+    if (row.authOverride === 'password') {
+      return {
+        host,
+        port,
+        username,
+        password: row.passwordOverride ?? '',
+      };
+    }
+    return {
+      host,
+      port,
+      username,
+      privateKey: row.privateKeyOverride ?? '',
+      passphrase: row.passphraseOverride || undefined,
+    };
+  };
 
-  const credentialsValid = authMode === 'key' ? privateKey.trim().length > 0 : password.length > 0;
+  const rowCredsValid = (row: Row): boolean => {
+    if (row.authOverride === 'password') return (row.passwordOverride ?? '').length > 0;
+    return (row.privateKeyOverride ?? '').trim().length > 0;
+  };
+
   const validRows = rows.filter((r) => r.host.trim() && r.username.trim() && r.moniker.trim().length >= 3 && r.nodePort >= 1024 && r.nodePort <= 65535);
+  const credentialsValid = validRows.length > 0 && validRows.every(rowCredsValid);
   const canRun = !running && credentialsValid && validRows.length > 0;
   const allTestedOk = validRows.length > 0 && validRows.every((r) => r.status === 'test-ok' || r.status === 'done');
 
@@ -151,18 +178,23 @@ export function DeploySshBatch() {
   };
 
   const testAll = async () => {
-    if (!credentialsValid) {
-      pushToast({ title: 'Credentials missing', body: authMode === 'key' ? 'Paste a private key first.' : 'Enter the SSH password first.', tone: 'warn' });
+    const targets = rows.filter((r) => r.host.trim() && r.username.trim());
+    const missing = targets.filter((r) => !rowCredsValid(r));
+    if (missing.length > 0) {
+      pushToast({
+        title: 'Credentials missing',
+        body: `${missing.length} host${missing.length === 1 ? '' : 's'} need${missing.length === 1 ? 's' : ''} a key or password. Click the key icon on each row to set it.`,
+        tone: 'warn',
+      });
       return;
     }
-    const targets = rows.filter((r) => r.host.trim() && r.username.trim());
     if (targets.length === 0) return;
 
     setRows((prev) => prev.map((r) => (targets.find((t) => t.id === r.id) ? { ...r, status: 'testing', testMessage: undefined } : r)));
 
     await Promise.all(targets.map(async (r) => {
       try {
-        const result: SSHTestResult = await window.api.ssh.test(sharedCreds(r.host.trim(), r.port, r.username.trim()));
+        const result: SSHTestResult = await window.api.ssh.test(credsForRow(r));
         updateRow(r.id, {
           status: result.ok ? 'test-ok' : 'test-fail',
           testMessage: result.ok ? `${result.latencyMs}ms · ${result.osInfo}` : result.message,
@@ -196,7 +228,7 @@ export function DeploySshBatch() {
           gigabytePriceDVPN: Number(gigabytePrice) || 0,
           hourlyPriceDVPN: Number(hourlyPrice) || 0,
           remoteUrl: effectiveRemoteUrl(row, remoteUrlPattern) || undefined,
-          ssh: sharedCreds(row.host.trim(), row.port, row.username.trim()),
+          ssh: credsForRow(row),
         });
         updateRow(row.id, { jobId, status: 'deploying' });
 
@@ -229,18 +261,18 @@ export function DeploySshBatch() {
         port: r.port,
         username: r.username.trim(),
       };
-      if (authMode === 'key') {
-        ssh.privateKey = privateKey ? '<paste key here>' : '<paste key here>';
-        if (passphrase) ssh.passphrase = '<passphrase>';
-      } else {
+      if (r.authOverride === 'password') {
         ssh.password = '<password>';
+      } else {
+        ssh.privateKey = '<paste key here>';
+        if (r.passphraseOverride) ssh.passphrase = '<passphrase>';
       }
       const url = effectiveRemoteUrl(r, remoteUrlPattern);
       const sshJson = JSON.stringify(ssh);
       const escapedSsh = sshJson.replace(/'/g, "'\\''");
       return `deploy.start --target remote --moniker ${r.moniker} --gb ${Number(gigabytePrice) || 0} --hr ${Number(hourlyPrice) || 0} --service ${service} --port ${r.nodePort}${url ? ` --remoteUrl ${url}` : ''} --ssh '${escapedSsh}'`;
     });
-  }, [validRows, authMode, privateKey, passphrase, gigabytePrice, hourlyPrice, service, remoteUrlPattern]);
+  }, [validRows, gigabytePrice, hourlyPrice, service, remoteUrlPattern]);
 
   const cliBlock = useMemo(() => cliCommands.join('\n\n'), [cliCommands]);
 
@@ -263,8 +295,18 @@ export function DeploySshBatch() {
     return { total, tested, deploying, done, failed };
   }, [rows]);
 
+  // Close CLI drawer on Escape.
+  useEffect(() => {
+    if (!cliOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCliOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cliOpen]);
+
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    <div className="flex flex-col h-full min-h-0 gap-2 relative">
       <PageHeader
         title="Deploy SSH · Batch"
         subtitle="Provision many SSH targets in one pass. Chain broadcasts run one-at-a-time to keep wallet sequences clean."
@@ -284,254 +326,496 @@ export function DeploySshBatch() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        {/* Left: hosts + controls */}
-        <div className="card col-span-12 lg:col-span-8 flex flex-col min-h-0 overflow-hidden">
-          <div className="card-header flex items-center justify-between">
-            <div className="card-title flex items-center gap-2">
-              <MIcon name="dns" size={14} />
-              Hosts ({rows.length})
+      {/* Compact toolbar: summary chips + toggles */}
+      <div
+        className="flex items-center gap-2 flex-wrap px-2 py-1.5 rounded-md"
+        style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}
+      >
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => setParamsOpen((v) => !v)}
+          title="Shared params & credentials"
+        >
+          <MIcon name={paramsOpen ? 'expand_less' : 'expand_more'} size={14} />
+          Shared params
+        </button>
+
+        {/* Always-visible chip strip for current shared-params state */}
+        <div className="flex items-center gap-1 flex-wrap text-[11px]">
+          <Chip onClick={() => setParamsOpen(true)} icon="vpn_lock" label={service} />
+          <Chip onClick={() => setParamsOpen(true)} icon="data_usage" label={`${gigabytePrice}/GB`} />
+          <Chip onClick={() => setParamsOpen(true)} icon="schedule" label={`${hourlyPrice}/hr`} />
+          <Chip onClick={() => setParamsOpen(true)} icon="link" label={remoteUrlPattern} mono />
+        </div>
+
+        <div className="flex-1" />
+
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() => setPasteOpen((v) => !v)}
+          title="Import hosts from CSV"
+        >
+          <MIcon name="upload" size={14} /> Import CSV
+        </button>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={() => setCliOpen(true)}
+          title="Open CLI automation drawer"
+        >
+          <MIcon name="terminal" size={14} /> Automate via CLI
+          {cliCommands.length > 0 && (
+            <span className="ml-1 px-1 rounded text-[10px]"
+              style={{ background: 'var(--accent)', color: '#000' }}>
+              {cliCommands.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* Collapsible shared params panel */}
+      {paramsOpen && (
+        <div className="card overflow-hidden">
+          <div className="card-body grid grid-cols-12 gap-2 py-2">
+            <div className="col-span-12">
+              <div className="field-label">Protocol</div>
+              <ProtocolTiles value={service} onChange={setService} />
             </div>
-            <div className="flex items-center gap-3 text-[11px]" style={{ color: 'var(--text-muted)' }}>
-              <span><b style={{ color: 'var(--green)' }}>{counts.tested}</b> tested</span>
-              <span><b style={{ color: 'var(--accent)' }}>{counts.deploying}</b> in flight</span>
-              <span><b style={{ color: 'var(--green)' }}>{counts.done}</b> done</span>
-              <span><b style={{ color: 'var(--red)' }}>{counts.failed}</b> failed</span>
+            <div className="col-span-4">
+              <div className="field-label">$P2P / GB</div>
+              <input value={gigabytePrice} onChange={(e) => setGigabytePrice(e.target.value)}
+                type="number" step="0.0001" min="0.0001" max="80" className="field-input" />
+            </div>
+            <div className="col-span-4">
+              <div className="field-label">$P2P / hour</div>
+              <input value={hourlyPrice} onChange={(e) => setHourlyPrice(e.target.value)}
+                type="number" step="0.0001" min="0.0001" max="80" className="field-input" />
+            </div>
+            <div className="col-span-4">
+              <div className="field-label">Public URL pattern</div>
+              <input value={remoteUrlPattern} onChange={(e) => setRemoteUrlPattern(e.target.value)}
+                placeholder="{host}:{port}" className="field-input mono-inline" />
+            </div>
+            <div className="col-span-12 text-[11px]" style={{ color: 'var(--text-dim)' }}>
+              Set the SSH key or password per host using the credentials button on each row. Network rules cap pricing at 80 $P2P.
             </div>
           </div>
-          <div className="card-body flex flex-col gap-2 flex-1 min-h-0 overflow-auto">
-            {/* Paste import */}
-            <details>
-              <summary className="text-xs cursor-pointer" style={{ color: 'var(--text-muted)' }}>
-                Paste CSV (host, user, sshPort, moniker, nodePort) — one per line
-              </summary>
-              <div className="flex flex-col gap-2 mt-2">
-                <textarea
-                  rows={3}
-                  className="field-input mono-inline text-xs"
-                  placeholder={'1.2.3.4, root, 22, dvpn-a, 7777\n5.6.7.8, root, 22, dvpn-b, 7778'}
-                  value={paste}
-                  onChange={(e) => setPaste(e.target.value)}
-                />
-                <div className="flex justify-end">
-                  <button className="btn btn-secondary btn-sm" onClick={importPaste} disabled={!paste.trim()}>
-                    Import & replace rows
+        </div>
+      )}
+
+      {/* CSV paste import */}
+      {pasteOpen && (
+        <div className="card overflow-hidden">
+          <div className="card-body flex flex-col gap-2 py-2">
+            <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+              Paste CSV — <code className="mono-inline">host, user, sshPort, moniker, nodePort</code> — one host per line (max 50).
+            </div>
+            <textarea
+              rows={3}
+              className="field-input mono-inline text-xs"
+              placeholder={'1.2.3.4, root, 22, dvpn-a, 7777\n5.6.7.8, root, 22, dvpn-b, 7778'}
+              value={paste}
+              onChange={(e) => setPaste(e.target.value)}
+            />
+            <div className="flex justify-end gap-2">
+              <button className="btn btn-ghost btn-sm" onClick={() => { setPaste(''); setPasteOpen(false); }}>
+                Cancel
+              </button>
+              <button className="btn btn-secondary btn-sm" onClick={importPaste} disabled={!paste.trim()}>
+                Import & replace rows
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DOMINANT: hosts table — fills remaining viewport */}
+      <div className="card flex flex-col overflow-hidden flex-1 min-h-0">
+        <div className="card-header flex items-center justify-between py-2">
+          <div className="card-title flex items-center gap-2">
+            <MIcon name="dns" size={14} />
+            Hosts ({rows.length})
+          </div>
+          <div className="flex items-center gap-3 text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            <span><b style={{ color: 'var(--green)' }}>{counts.tested}</b> tested</span>
+            <span><b style={{ color: 'var(--accent)' }}>{counts.deploying}</b> in flight</span>
+            <span><b style={{ color: 'var(--green)' }}>{counts.done}</b> done</span>
+            <span><b style={{ color: 'var(--red)' }}>{counts.failed}</b> failed</span>
+          </div>
+        </div>
+        <div className="flex-1 min-h-0 overflow-auto">
+          <div className="grid text-[11px] uppercase tracking-wider px-2 py-1.5 sticky top-0 z-10"
+            style={{ gridTemplateColumns: 'minmax(0,1.5fr) 80px minmax(0,0.9fr) minmax(0,1.2fr) 64px minmax(0,1.4fr) 96px 76px 28px', gap: '4px', background: 'var(--bg-input)', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
+            <div className="truncate">Host</div>
+            <div className="truncate">SSH port</div>
+            <div className="truncate">User</div>
+            <div className="truncate">Moniker</div>
+            <div className="truncate" title="Node listen port (dvpn service public port)">Port</div>
+            <div className="truncate">Public URL</div>
+            <div className="text-center truncate">Credentials</div>
+            <div className="text-center truncate">Status</div>
+            <div />
+          </div>
+          {rows.map((r) => {
+            const tone = statusTone(r.status);
+            const portValid = Number.isInteger(r.nodePort) && r.nodePort >= 1024 && r.nodePort <= 65535;
+            const credSet = rowCredsValid(r);
+            return (
+              <div key={r.id} className="grid items-start px-2 py-1.5"
+                style={{ gridTemplateColumns: 'minmax(0,1.5fr) 80px minmax(0,0.9fr) minmax(0,1.2fr) 64px minmax(0,1.4fr) 96px 76px 28px', gap: '4px', borderBottom: '1px solid var(--border)' }}>
+                <input className="field-input mono-inline text-xs" style={{ minWidth: 0 }} value={r.host}
+                  onChange={(e) => updateRow(r.id, { host: e.target.value })} placeholder="1.2.3.4" />
+                <input className="field-input text-xs" style={{ minWidth: 0 }} type="number" value={r.port}
+                  onChange={(e) => updateRow(r.id, { port: Number(e.target.value) || 22 })} />
+                <input className="field-input mono-inline text-xs" style={{ minWidth: 0 }} value={r.username}
+                  onChange={(e) => updateRow(r.id, { username: e.target.value })} />
+                <input className="field-input mono-inline text-xs" style={{ minWidth: 0 }} value={r.moniker}
+                  onChange={(e) => updateRow(r.id, { moniker: e.target.value })} />
+                <input className="field-input text-xs" style={{ minWidth: 0 }} type="number" value={r.nodePort}
+                  onChange={(e) => updateRow(r.id, { nodePort: Number(e.target.value) })}
+                  aria-invalid={!portValid} />
+                <input className="field-input mono-inline text-xs" style={{ minWidth: 0 }} value={r.remoteUrlOverride}
+                  onChange={(e) => updateRow(r.id, { remoteUrlOverride: e.target.value })}
+                  placeholder={applyUrlPattern(remoteUrlPattern, r.host || 'host', r.nodePort)} />
+                <button
+                  onClick={() => setCredsRowId(r.id)}
+                  disabled={running}
+                  title={credSet
+                    ? `${r.authOverride === 'password' ? 'Password' : 'SSH key'} set — click to edit`
+                    : 'Click to set SSH key or password for this host'}
+                  className="self-center"
+                  style={{
+                    height: 26,
+                    width: '100%',
+                    minWidth: 0,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 4,
+                    padding: '0 6px',
+                    borderRadius: 6,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    cursor: running ? 'not-allowed' : 'pointer',
+                    background: 'transparent',
+                    color: credSet ? 'var(--green)' : 'var(--red)',
+                    border: `1px solid ${credSet ? 'var(--border)' : 'color-mix(in srgb, var(--red) 50%, transparent)'}`,
+                  }}
+                >
+                  <MIcon
+                    name={credSet ? 'check_circle' : 'add'}
+                    size={13}
+                  />
+                  <span>
+                    {credSet
+                      ? (r.authOverride === 'password' ? 'Pass' : 'Key')
+                      : 'Set'}
+                  </span>
+                </button>
+                <div className="text-[11px] flex flex-col self-center text-center" style={{ minWidth: 0, overflow: 'hidden' }}>
+                  <span style={{ color: tone.color, fontWeight: 600 }}>{tone.label}</span>
+                  {r.status === 'deploying' && (
+                    <span style={{ color: 'var(--text-muted)' }}>{r.percent ?? 0}% {r.phase ?? ''}</span>
+                  )}
+                  {r.testMessage && (r.status === 'test-ok' || r.status === 'test-fail') && (
+                    <span className="truncate" title={r.testMessage} style={{ color: 'var(--text-muted)' }}>{r.testMessage}</span>
+                  )}
+                  {r.message && r.status === 'error' && (
+                    <span className="truncate" title={r.message} style={{ color: 'var(--red)' }}>{r.message}</span>
+                  )}
+                </div>
+                <button
+                  className="btn btn-ghost btn-sm self-center"
+                  onClick={() => removeRow(r.id)}
+                  disabled={rows.length === 1 || running}
+                  title="Remove row"
+                  style={{ padding: 2 }}
+                >
+                  <MIcon name="close" size={14} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Sticky action bar */}
+      <div
+        className="flex items-center justify-between gap-2 px-2 py-2 rounded-md"
+        style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}
+      >
+        <button className="btn btn-secondary btn-sm" onClick={addRow} disabled={running || rows.length >= 50}>
+          <MIcon name="add" size={14} /> Add host
+        </button>
+        <div className="flex items-center gap-2">
+          <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+            {validRows.length} valid · {counts.tested} ready
+          </span>
+          <button className="btn btn-secondary" onClick={testAll} disabled={running || !credentialsValid}>
+            <MIcon name="network_check" size={14} /> Test all SSH
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={deployAll}
+            disabled={!canRun || !allTestedOk}
+            title={!allTestedOk ? 'Run "Test all" until every host shows SSH OK.' : undefined}
+          >
+            {running ? 'Deploying…' : `Deploy all (${validRows.length})`}
+            <MIcon name="arrow_forward" size={14} />
+          </button>
+        </div>
+      </div>
+
+      {/* CLI slide-over drawer */}
+      {cliOpen && (
+        <>
+          <div
+            onClick={() => setCliOpen(false)}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(0,0,0,0.45)',
+              zIndex: 40,
+            }}
+          />
+          <aside
+            role="dialog"
+            aria-label="CLI automation"
+            style={{
+              position: 'absolute',
+              top: 0,
+              right: 0,
+              bottom: 0,
+              width: 'min(520px, 92%)',
+              background: 'var(--bg)',
+              borderLeft: '1px solid var(--border)',
+              boxShadow: '0 0 24px rgba(0,0,0,0.4)',
+              zIndex: 50,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            <div className="flex items-center justify-between px-3 py-2"
+              style={{ borderBottom: '1px solid var(--border)' }}>
+              <div className="flex items-center gap-2">
+                <MIcon name="terminal" size={16} />
+                <div className="card-title">Automate via CLI</div>
+                <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                  {cliCommands.length} command{cliCommands.length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <button className="btn btn-ghost btn-sm" onClick={() => setCliOpen(false)} title="Close (Esc)">
+                <MIcon name="close" size={16} />
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-2 p-3 flex-1 min-h-0 overflow-auto">
+              <div className="text-xs" style={{ color: 'var(--text)' }}>
+                Pipe these one-shot commands through the{' '}
+                <a
+                  href="#cli"
+                  onClick={(e) => { e.preventDefault(); navigate({ name: 'cli' }); }}
+                  style={{ color: 'var(--accent)', textDecoration: 'underline', cursor: 'pointer' }}
+                >
+                  in-app CLI
+                </a>{' '}
+                or your shell with <code className="mono-inline">sentinel-node-manager -e &quot;…&quot;</code>.
+              </div>
+              <ol className="list-decimal pl-4 flex flex-col gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+                <li>
+                  Start the CLI server in{' '}
+                  <a
+                    href="#settings"
+                    onClick={(e) => { e.preventDefault(); navigate({ name: 'settings' }); }}
+                    style={{ color: 'var(--accent)', textDecoration: 'underline', cursor: 'pointer' }}
+                  >
+                    Settings → CLI server
+                  </a>{' '}
+                  (or enable auto-start).
+                </li>
+                <li>Replace <code>&lt;paste key here&gt;</code> / <code>&lt;password&gt;</code> with the real value.</li>
+                <li>Run each line in order — wallet broadcasts must stay sequential.</li>
+                <li>Track each job with <code>deploy.status &lt;jobId&gt;</code>.</li>
+              </ol>
+
+              <div className="flex items-center gap-2">
+                <button className="btn btn-secondary btn-sm flex-1" onClick={copyCli} disabled={cliCommands.length === 0}>
+                  <MIcon name="content_copy" size={14} /> Copy all
+                </button>
+                <a
+                  href="#cli"
+                  onClick={(e) => { e.preventDefault(); navigate({ name: 'cli' }); }}
+                  className="btn btn-primary btn-sm flex-1"
+                  style={{ textDecoration: 'none' }}
+                >
+                  <MIcon name="open_in_new" size={14} /> Open CLI screen
+                </a>
+              </div>
+
+              <pre
+                className="text-xs mono-inline p-3 overflow-auto flex-1 min-h-0"
+                style={{
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  color: 'var(--text)',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}
+              >
+{cliBlock || '# Add at least one valid host to generate commands.'}
+              </pre>
+            </div>
+          </aside>
+        </>
+      )}
+
+      {credsRowId && (() => {
+        const row = rows.find((x) => x.id === credsRowId);
+        if (!row) return null;
+        const effectiveMode: 'key' | 'password' = row.authOverride ?? 'key';
+        const onClose = () => setCredsRowId(null);
+        return (
+          <>
+            <div
+              onClick={onClose}
+              style={{
+                position: 'absolute',
+                inset: 0,
+                background: 'rgba(0,0,0,0.45)',
+                zIndex: 60,
+              }}
+            />
+            <div
+              role="dialog"
+              aria-label="Per-host credentials"
+              style={{
+                position: 'absolute',
+                top: '50%',
+                left: '50%',
+                transform: 'translate(-50%, -50%)',
+                width: 'min(440px, 92%)',
+                background: 'var(--bg)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                boxShadow: '0 0 32px rgba(0,0,0,0.55)',
+                zIndex: 70,
+                display: 'flex',
+                flexDirection: 'column',
+              }}
+            >
+              <div
+                className="flex items-center justify-between px-3 py-2"
+                style={{ borderBottom: '1px solid var(--border)' }}
+              >
+                <div className="flex items-center gap-2">
+                  <MIcon name="vpn_key" size={16} />
+                  <div className="card-title">Credentials for {row.host || 'this host'}</div>
+                </div>
+                <button className="btn btn-ghost btn-sm" onClick={onClose} title="Close">
+                  <MIcon name="close" size={16} />
+                </button>
+              </div>
+
+              <div className="flex flex-col gap-2 p-3">
+                <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                  Set the SSH credential for this host. Each host needs its own key or password.
+                </div>
+
+                <div className="flex gap-2">
+                  <button
+                    className={`btn flex-1 btn-sm ${effectiveMode === 'key' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => updateRow(row.id, { authOverride: 'key' })}
+                  >
+                    <MIcon name="key" size={14} /> SSH key
+                  </button>
+                  <button
+                    className={`btn flex-1 btn-sm ${effectiveMode === 'password' ? 'btn-primary' : 'btn-secondary'}`}
+                    onClick={() => updateRow(row.id, { authOverride: 'password' })}
+                  >
+                    <MIcon name="password" size={14} /> Password
+                  </button>
+                </div>
+
+                {effectiveMode === 'key' ? (
+                  <>
+                    <textarea
+                      rows={4}
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      value={row.privateKeyOverride ?? ''}
+                      onChange={(e) =>
+                        updateRow(row.id, {
+                          authOverride: 'key',
+                          privateKeyOverride: e.target.value,
+                        })
+                      }
+                      className="field-input mono-inline text-xs"
+                    />
+                    <input
+                      type="password"
+                      placeholder="Passphrase (optional)"
+                      value={row.passphraseOverride ?? ''}
+                      onChange={(e) =>
+                        updateRow(row.id, {
+                          authOverride: 'key',
+                          passphraseOverride: e.target.value,
+                        })
+                      }
+                      className="field-input"
+                    />
+                  </>
+                ) : (
+                  <input
+                    type="password"
+                    placeholder="SSH password for this host"
+                    value={row.passwordOverride ?? ''}
+                    onChange={(e) =>
+                      updateRow(row.id, {
+                        authOverride: 'password',
+                        passwordOverride: e.target.value,
+                      })
+                    }
+                    className="field-input"
+                  />
+                )}
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button className="btn btn-primary btn-sm" onClick={onClose}>
+                    Done
                   </button>
                 </div>
               </div>
-            </details>
-
-            {/* Hosts table */}
-            <div className="rounded-md overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-              <div className="grid text-[11px] uppercase tracking-wider px-2 py-1.5"
-                style={{ gridTemplateColumns: '1.6fr 0.5fr 0.8fr 1.1fr 0.6fr 1.4fr 0.9fr 28px', background: 'var(--bg-input)', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
-                <div>Host</div>
-                <div>Port</div>
-                <div>User</div>
-                <div>Moniker</div>
-                <div>Node port</div>
-                <div>Public URL override</div>
-                <div>Status</div>
-                <div />
-              </div>
-              {rows.map((r) => {
-                const tone = statusTone(r.status);
-                const portValid = Number.isInteger(r.nodePort) && r.nodePort >= 1024 && r.nodePort <= 65535;
-                return (
-                  <div key={r.id} className="grid items-center px-2 py-1.5 gap-1"
-                    style={{ gridTemplateColumns: '1.6fr 0.5fr 0.8fr 1.1fr 0.6fr 1.4fr 0.9fr 28px', borderBottom: '1px solid var(--border)' }}>
-                    <input className="field-input mono-inline text-xs" value={r.host}
-                      onChange={(e) => updateRow(r.id, { host: e.target.value })} placeholder="1.2.3.4" />
-                    <input className="field-input text-xs" type="number" value={r.port}
-                      onChange={(e) => updateRow(r.id, { port: Number(e.target.value) || 22 })} />
-                    <input className="field-input mono-inline text-xs" value={r.username}
-                      onChange={(e) => updateRow(r.id, { username: e.target.value })} />
-                    <input className="field-input mono-inline text-xs" value={r.moniker}
-                      onChange={(e) => updateRow(r.id, { moniker: e.target.value })} />
-                    <input className="field-input text-xs" type="number" value={r.nodePort}
-                      onChange={(e) => updateRow(r.id, { nodePort: Number(e.target.value) })}
-                      aria-invalid={!portValid} />
-                    <input className="field-input mono-inline text-xs" value={r.remoteUrlOverride}
-                      onChange={(e) => updateRow(r.id, { remoteUrlOverride: e.target.value })}
-                      placeholder={applyUrlPattern(remoteUrlPattern, r.host || 'host', r.nodePort)} />
-                    <div className="text-[11px] flex flex-col">
-                      <span style={{ color: tone.color, fontWeight: 600 }}>{tone.label}</span>
-                      {r.status === 'deploying' && (
-                        <span style={{ color: 'var(--text-muted)' }}>{r.percent ?? 0}% {r.phase ?? ''}</span>
-                      )}
-                      {r.testMessage && (r.status === 'test-ok' || r.status === 'test-fail') && (
-                        <span className="truncate" title={r.testMessage} style={{ color: 'var(--text-muted)' }}>{r.testMessage}</span>
-                      )}
-                      {r.message && r.status === 'error' && (
-                        <span className="truncate" title={r.message} style={{ color: 'var(--red)' }}>{r.message}</span>
-                      )}
-                    </div>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      onClick={() => removeRow(r.id)}
-                      disabled={rows.length === 1 || running}
-                      title="Remove row"
-                      style={{ padding: 2 }}
-                    >
-                      <MIcon name="close" size={14} />
-                    </button>
-                  </div>
-                );
-              })}
             </div>
-
-            <div className="flex items-center justify-between gap-2">
-              <button className="btn btn-secondary btn-sm" onClick={addRow} disabled={running || rows.length >= 50}>
-                <MIcon name="add" size={14} /> Add host
-              </button>
-              <div className="flex items-center gap-2">
-                <button className="btn btn-secondary" onClick={testAll} disabled={running || !credentialsValid}>
-                  <MIcon name="network_check" size={14} /> Test all SSH
-                </button>
-                <button
-                  className="btn btn-primary"
-                  onClick={deployAll}
-                  disabled={!canRun || !allTestedOk}
-                  title={!allTestedOk ? 'Run "Test all" until every host shows SSH OK.' : undefined}
-                >
-                  {running ? 'Deploying…' : `Deploy all (${validRows.length})`}
-                  <MIcon name="arrow_forward" size={14} />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Right: shared creds + params + CLI panel */}
-        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0 gap-3 overflow-auto">
-          <div className="card flex flex-col overflow-hidden">
-            <div className="card-header">
-              <div className="card-title flex items-center gap-2">
-                <MIcon name="security" size={14} />
-                Shared credentials
-              </div>
-            </div>
-            <div className="card-body flex flex-col gap-1.5">
-              <div className="flex gap-2">
-                <button className={`btn flex-1 btn-sm ${authMode === 'key' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setAuthMode('key')}>
-                  <MIcon name="key" size={14} /> SSH key
-                </button>
-                <button className={`btn flex-1 btn-sm ${authMode === 'password' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setAuthMode('password')}>
-                  <MIcon name="password" size={14} /> Password
-                </button>
-              </div>
-              {authMode === 'key' ? (
-                <>
-                  <textarea
-                    rows={2}
-                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                    value={privateKey}
-                    onChange={(e) => setPrivateKey(e.target.value)}
-                    className="field-input mono-inline text-xs"
-                  />
-                  <input
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    type="password"
-                    placeholder="Passphrase (optional)"
-                    className="field-input"
-                  />
-                </>
-              ) : (
-                <input
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  type="password"
-                  placeholder="SSH password (shared)"
-                  className="field-input"
-                />
-              )}
-              <div className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
-                Same credentials apply to every row. For per-host keys, use the CLI snippets below.
-              </div>
-            </div>
-          </div>
-
-          <div className="card flex flex-col overflow-hidden">
-            <div className="card-header">
-              <div className="card-title">Shared deploy params</div>
-            </div>
-            <div className="card-body flex flex-col gap-2">
-              <div>
-                <div className="field-label">Protocol</div>
-                <ProtocolTiles value={service} onChange={setService} />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <div className="field-label">$P2P / GB</div>
-                  <input value={gigabytePrice} onChange={(e) => setGigabytePrice(e.target.value)}
-                    type="number" step="0.0001" min="0.0001" max="80" className="field-input" />
-                </div>
-                <div>
-                  <div className="field-label">$P2P / hour</div>
-                  <input value={hourlyPrice} onChange={(e) => setHourlyPrice(e.target.value)}
-                    type="number" step="0.0001" min="0.0001" max="80" className="field-input" />
-                </div>
-              </div>
-              <div>
-                <div className="field-label">Public URL pattern</div>
-                <input value={remoteUrlPattern} onChange={(e) => setRemoteUrlPattern(e.target.value)}
-                  placeholder="{host}:{port}" className="field-input mono-inline" />
-                <div className="text-[11px] mt-1" style={{ color: 'var(--text-dim)' }}>
-                  Use <code>{'{host}'}</code> and <code>{'{port}'}</code>. Per-row overrides win.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="card flex flex-col overflow-hidden">
-            <div className="card-header flex items-center justify-between">
-              <div className="card-title flex items-center gap-2">
-                <MIcon name="terminal" size={14} />
-                Automate via CLI
-              </div>
-              <button className="btn btn-ghost btn-sm" onClick={() => setShowCli((v) => !v)}>
-                {showCli ? 'Hide' : 'Show'}
-              </button>
-            </div>
-            <div className="card-body flex flex-col gap-2 text-xs">
-              <div style={{ color: 'var(--text-muted)' }}>
-                Prefer scripting? Pipe these one-shot commands through{' '}
-                <code className="mono-inline">sentinel-node-manager -e "&lt;cmd&gt;"</code> from your shell.
-                Sequence them yourself to keep wallet broadcasts ordered.
-              </div>
-              <ol className="text-[11px] list-decimal pl-4 flex flex-col gap-1" style={{ color: 'var(--text-muted)' }}>
-                <li>Start the in-app CLI server (Settings → CLI server, or auto-start).</li>
-                <li>Replace <code>&lt;paste key here&gt;</code> / <code>&lt;password&gt;</code> with the real value (or read from a file in your shell).</li>
-                <li>Run each line in order. Use <code>deploy.status &lt;jobId&gt;</code> to track each one.</li>
-              </ol>
-              {showCli && (
-                <pre
-                  className="text-[11px] mono-inline p-2 overflow-auto max-h-56"
-                  style={{
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--text)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-all',
-                  }}
-                >
-{cliBlock || '# Add at least one valid host above to generate commands.'}
-                </pre>
-              )}
-              <div className="flex items-center justify-between gap-2 mt-1">
-                <button className="btn btn-secondary btn-sm" onClick={copyCli} disabled={cliCommands.length === 0}>
-                  <MIcon name="content_copy" size={14} /> Copy {cliCommands.length || ''} command{cliCommands.length === 1 ? '' : 's'}
-                </button>
-                <button className="btn btn-primary btn-sm" onClick={() => navigate({ name: 'cli' })}>
-                  Open CLI <MIcon name="arrow_forward" size={14} />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+          </>
+        );
+      })()}
     </div>
+  );
+}
+
+interface ChipProps {
+  icon: string;
+  label: string;
+  onClick?: () => void;
+  mono?: boolean;
+  tone?: string;
+}
+
+function Chip({ icon, label, onClick, mono, tone }: ChipProps) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1 px-1.5 py-0.5 rounded ${mono ? 'mono-inline' : ''}`}
+      style={{
+        background: 'var(--bg)',
+        border: '1px solid var(--border)',
+        color: tone ?? 'var(--text)',
+        fontSize: 11,
+        cursor: onClick ? 'pointer' : 'default',
+      }}
+      title={label}
+    >
+      <MIcon name={icon} size={12} />
+      <span className="truncate" style={{ maxWidth: 160, display: 'inline-block' }}>{label}</span>
+    </button>
   );
 }

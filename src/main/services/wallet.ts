@@ -11,7 +11,13 @@ import {
   udvpnToDvpn,
 } from './chain';
 import { getSettings } from './settings';
-import { readClients, signClient } from './sentinel-client';
+import {
+  readClients,
+  signClient,
+  withRpcTimeout,
+  RPC_QUERY_TIMEOUT_MS,
+  RPC_BROADCAST_TIMEOUT_MS,
+} from './sentinel-client';
 import { readStore, writeStore } from './store';
 import { addEvent } from './events';
 import { log } from './logger';
@@ -49,8 +55,9 @@ function mnemonicPath(): string {
 async function requireEncryption(): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error(
-      'Encrypted storage is unavailable. Refusing to persist a plaintext mnemonic. ' +
-        'On Linux, enable a keyring (gnome-keyring / kwallet). macOS Keychain and Windows DPAPI work by default.',
+      'This computer cannot safely save your wallet recovery phrase. ' +
+        'On Linux, turn on a system keyring (such as gnome-keyring or kwallet) and try again. ' +
+        'On Windows and macOS this normally works automatically — please make sure you are signed in to your user account.',
     );
   }
 }
@@ -155,7 +162,7 @@ export async function restoreWallet(phrase: string): Promise<WalletState> {
   try {
     new EnglishMnemonic(trimmed);
   } catch {
-    throw new Error('Invalid mnemonic — expected a BIP-39 English phrase of 12 / 15 / 18 / 21 / 24 words.');
+    throw new Error('That recovery phrase doesn\'t look right. Please enter the 12, 15, 18, 21, or 24 English words from your wallet backup, separated by single spaces.');
   }
   const { wallet } = await persistMnemonic(trimmed, 'wallet-restored');
   return wallet;
@@ -232,7 +239,11 @@ export async function refreshWalletBalance(): Promise<WalletState> {
 export async function fetchBalance(address: string): Promise<number> {
   const { stargate, disconnect } = await readClients();
   try {
-    const coin = await stargate.getBalance(address, DENOM);
+    const coin = await withRpcTimeout(
+      () => stargate.getBalance(address, DENOM),
+      RPC_QUERY_TIMEOUT_MS,
+      'getBalance',
+    );
     return udvpnToDvpn(coin.amount);
   } finally {
     disconnect();
@@ -252,74 +263,108 @@ export async function sendTokens(req: SendTxRequest): Promise<SendTxResult> {
     return { ok: false, error: 'Amount must be greater than 0.', errorCode: 'invalid-address' };
   }
 
-  try {
-    const settings = await getSettings();
-    const signer = await appSigner();
-    const [{ address: from }] = await signer.getAccounts();
-    const { client, disconnect, url } = await signClient(signer);
+  // Retry on transient RPC failures: pool-wide outages, timeouts, and
+  // sequence races. Wallet sends are safe to retry because the chain
+  // rejects a duplicate (sequence, account) tuple — at most one of N
+  // retries can land. Hard failures (insufficient funds, invalid
+  // address, chain mismatch, non-zero broadcast code) break out
+  // immediately so we don't waste DVPN on guaranteed-failing retries.
+  const MAX_SEND_ATTEMPTS = 4;
+  const SEND_RETRY_DELAY_MS = 4_000;
+  const isTransient = (msg: string) =>
+    /timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo|EAI_AGAIN|Could not connect to the Sentinel network|none responded|sequence mismatch/i.test(
+      msg,
+    );
 
+  let lastErr = '';
+  let lastCode: SendTxResult['errorCode'] = 'timeout';
+  for (let attempt = 1; attempt <= MAX_SEND_ATTEMPTS; attempt++) {
     try {
-      // Chain-id guard: abort if the selected RPC is on the wrong chain.
-      const actualChainId = await client.getChainId();
-      if (actualChainId !== settings.chainId) {
-        return {
-          ok: false,
-          error: `RPC ${url} reports chain ${actualChainId} but app is configured for ${settings.chainId}. Aborting.`,
-          errorCode: 'chain-mismatch',
-        };
-      }
+      const settings = await getSettings();
+      const signer = await appSigner();
+      const [{ address: from }] = await signer.getAccounts();
+      const { client, disconnect, url } = await signClient(signer);
 
-      const coins = [{ denom: DENOM, amount: dvpnToUdvpn(req.amountDVPN) }];
-      const memo = req.memo ?? '';
-      // Explicit StdFee — using 'auto' would trip the SDK's dual-cosmjs
-      // instanceof check on GasPrice. Gas is generous for MsgSend, and we
-      // compute fee = gas * gasPriceUdvpn (rounded up).
-      const gas = GAS_FALLBACK;
-      const feeUdvpn = String(Math.max(1, Math.ceil(gas * Number(settings.gasPriceUdvpn))));
-      const fee = { amount: [{ denom: DENOM, amount: feeUdvpn }], gas: String(gas) };
-      const result = await client.sendTokens(from, req.to.trim(), coins, fee, memo);
+      try {
+        const actualChainId = await withRpcTimeout(
+          () => client.getChainId(),
+          RPC_QUERY_TIMEOUT_MS,
+          'getChainId',
+        );
+        if (actualChainId !== settings.chainId) {
+          return {
+            ok: false,
+            error: `RPC ${url} reports chain ${actualChainId} but app is configured for ${settings.chainId}. Aborting.`,
+            errorCode: 'chain-mismatch',
+          };
+        }
 
-      if (result.code !== 0) {
-        const classified = classifyErr(result.rawLog ?? '');
+        const coins = [{ denom: DENOM, amount: dvpnToUdvpn(req.amountDVPN) }];
+        const memo = req.memo ?? '';
+        const gas = GAS_FALLBACK;
+        const feeUdvpn = String(Math.max(1, Math.ceil(gas * Number(settings.gasPriceUdvpn))));
+        const fee = { amount: [{ denom: DENOM, amount: feeUdvpn }], gas: String(gas) };
+        const result = await withRpcTimeout(
+          () => client.sendTokens(from, req.to.trim(), coins, fee, memo),
+          RPC_BROADCAST_TIMEOUT_MS,
+          'sendTokens',
+        );
+
+        if (result.code !== 0) {
+          const classified = classifyErr(result.rawLog ?? '');
+          if (classified === 'sequence-mismatch' && attempt < MAX_SEND_ATTEMPTS) {
+            lastErr = result.rawLog ?? `code ${result.code}`;
+            lastCode = classified;
+            log.warn('sendTokens sequence-mismatch, retrying', { attempt, err: lastErr.slice(0, 160) });
+            await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAY_MS));
+            continue;
+          }
+          await addEvent({
+            kind: 'withdraw-failed',
+            title: 'Send failed',
+            subtitle: sanitizeErr(result.rawLog),
+            amountDVPN: -req.amountDVPN,
+          });
+          return { ok: false, error: sanitizeErr(result.rawLog), errorCode: classified };
+        }
+
         await addEvent({
-          kind: 'withdraw-failed',
-          title: 'Send failed',
-          subtitle: sanitizeErr(result.rawLog),
+          kind: 'withdraw-sent',
+          title: 'Send confirmed',
+          subtitle: `to ${req.to.slice(0, 10)}…${req.to.slice(-6)}`,
           amountDVPN: -req.amountDVPN,
+          txHash: result.transactionHash,
         });
-        return { ok: false, error: sanitizeErr(result.rawLog), errorCode: classified };
+        refreshWalletBalance().catch(() => undefined);
+
+        return {
+          ok: true,
+          txHash: result.transactionHash,
+          height: result.height,
+          gasUsed: Number(result.gasUsed ?? 0),
+        };
+      } finally {
+        disconnect();
       }
-
-      await addEvent({
-        kind: 'withdraw-sent',
-        title: 'Send confirmed',
-        subtitle: `to ${req.to.slice(0, 10)}…${req.to.slice(-6)}`,
-        amountDVPN: -req.amountDVPN,
-        txHash: result.transactionHash,
-      });
-      refreshWalletBalance().catch(() => undefined);
-
-      return {
-        ok: true,
-        txHash: result.transactionHash,
-        height: result.height,
-        gasUsed: Number(result.gasUsed ?? 0),
-      };
-    } finally {
-      disconnect();
+    } catch (err) {
+      lastErr = (err as Error).message ?? 'Unknown broadcast error';
+      lastCode = classifyErr(lastErr);
+      if (!isTransient(lastErr) || attempt === MAX_SEND_ATTEMPTS) {
+        break;
+      }
+      log.warn('sendTokens transient failure, retrying', { attempt, err: lastErr.slice(0, 160) });
+      await new Promise((resolve) => setTimeout(resolve, SEND_RETRY_DELAY_MS));
     }
-  } catch (err) {
-    const msg = (err as Error).message ?? 'Unknown broadcast error';
-    const classified = classifyErr(msg);
-    log.error('sendTokens failed', { err: msg });
-    await addEvent({
-      kind: 'withdraw-failed',
-      title: 'Send failed',
-      subtitle: sanitizeErr(msg),
-      amountDVPN: -req.amountDVPN,
-    });
-    return { ok: false, error: sanitizeErr(msg), errorCode: classified };
   }
+
+  log.error('sendTokens failed', { err: lastErr });
+  await addEvent({
+    kind: 'withdraw-failed',
+    title: 'Send failed',
+    subtitle: sanitizeErr(lastErr),
+    amountDVPN: -req.amountDVPN,
+  });
+  return { ok: false, error: sanitizeErr(lastErr), errorCode: lastCode };
 }
 
 export function classifyErr(rawLog: string): SendTxResult['errorCode'] {

@@ -106,23 +106,25 @@ export function WalletSetup() {
       {mode === 'choose' && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <ChoiceCard
-            icon="shield"
+            icon="add_circle"
             title="Create new wallet"
-            desc="Generate a fresh 24-word BIP-39 recovery phrase. The phrase is displayed only once, so store it securely."
-            cta={busy ? 'Working…' : 'Initialize secure vault'}
-            ctaIcon="add"
+            desc="Generate a fresh 24-word BIP-39 recovery phrase. Shown only once — record it before continuing."
+            cta={busy ? 'Working…' : 'Create wallet'}
+            ctaIcon="arrow_forward"
             busy={busy}
             onClick={doCreate}
+            tone="accent"
           />
           <ChoiceCard
-            icon="key"
+            icon="restore"
             title="Restore existing wallet"
-            desc="Import an existing Sentinel or Cosmos account using its 12 to 24-word recovery phrase."
-            cta="Restore from recovery phrase"
-            ctaIcon="key_vertical"
+            desc="Import a Sentinel or Cosmos account using its 12 to 24-word recovery phrase."
+            cta="Restore wallet"
+            ctaIcon="arrow_forward"
             busy={false}
             onClick={() => setMode('restore')}
             secondary
+            tone="muted"
           />
           {error && <div className="md:col-span-2 callout callout-danger">{error}</div>}
         </div>
@@ -501,6 +503,7 @@ function ChoiceCard({
   onClick,
   busy,
   secondary,
+  tone = 'accent',
 }: {
   icon: string;
   title: string;
@@ -510,26 +513,40 @@ function ChoiceCard({
   onClick: () => void;
   busy: boolean;
   secondary?: boolean;
+  tone?: 'accent' | 'muted';
 }) {
+  const isAccent = tone === 'accent';
+  const tileBg = isAccent
+    ? 'color-mix(in srgb, var(--accent) 14%, transparent)'
+    : 'color-mix(in srgb, var(--text-muted) 10%, transparent)';
+  const tileBorder = isAccent
+    ? '1px solid color-mix(in srgb, var(--accent) 35%, transparent)'
+    : '1px solid var(--border)';
+  const tileColor = isAccent ? 'var(--accent)' : 'var(--text-muted)';
   return (
-    <div className="card col-span-12 md:col-span-6 flex flex-col">
-      <div className="card-body flex flex-col flex-1 gap-3">
+    <div className="card flex flex-col h-full">
+      <div className="card-body flex flex-col items-center text-center flex-1 gap-5 p-8">
         <div
-          className="h-11 w-11 rounded-lg grid place-items-center"
+          className="rounded-2xl grid place-items-center"
           style={{
-            background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
-            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
-            color: 'var(--accent)',
+            height: 88,
+            width: 88,
+            background: tileBg,
+            border: tileBorder,
+            color: tileColor,
           }}
         >
-          <MIcon name={icon} size={20} />
+          <MIcon name={icon} size={44} />
         </div>
-        <div className="text-lg font-semibold" style={{ color: 'var(--text)' }}>
-          {title}
+        <div className="flex flex-col gap-2 items-center">
+          <div className="text-xl font-semibold leading-tight" style={{ color: 'var(--text)' }}>
+            {title}
+          </div>
+          <p className="text-sm leading-relaxed max-w-xs" style={{ color: 'var(--text-muted)' }}>
+            {desc}
+          </p>
         </div>
-        <p className="text-sm flex-1" style={{ color: 'var(--text-muted)' }}>
-          {desc}
-        </p>
+        <div className="flex-1" />
         <button
           onClick={onClick}
           disabled={busy}

@@ -12,10 +12,13 @@ import {
   type DockerOverview,
   type DeployRequest,
   type DeployedNode,
+  type LiveSystemStats,
   type LocalSystemReport,
   type MetricsSample,
   type MetricsWindow,
+  type MnemonicExportResult,
   type NodeLiveStatus,
+  type NodeLiveStatusUpdate,
   type NodeLogExportRequest,
   type NodeLogExportResult,
   type NodeWithdrawRequest,
@@ -40,6 +43,12 @@ const api = {
     report: (): Promise<LocalSystemReport> => ipcRenderer.invoke(IPC.SYSTEM_REPORT),
     exportDiagnostics: (): Promise<{ ok: boolean; path?: string; cancelled?: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC.SYSTEM_DIAGNOSTICS),
+    startLiveStats: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.SYSTEM_LIVE_STATS_START),
+    stopLiveStats: (): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke(IPC.SYSTEM_LIVE_STATS_STOP),
+    onLiveStats: (cb: (s: LiveSystemStats) => void) =>
+      subscribe<LiveSystemStats>(IPC.SYSTEM_LIVE_STATS, cb),
   },
 
   docker: {
@@ -63,6 +72,8 @@ const api = {
       ipcRenderer.invoke(IPC.DOCKER_STOP_ALL_SENTINEL),
     prune: (): Promise<{ removed: number; reclaimedBytes: number }> =>
       ipcRenderer.invoke(IPC.DOCKER_PRUNE),
+    openSettings: (): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.DOCKER_OPEN_SETTINGS),
   },
 
   settings: {
@@ -117,6 +128,7 @@ const api = {
     restart: (id: string): Promise<void> => ipcRenderer.invoke(IPC.NODES_RESTART, id),
     stop: (id: string): Promise<void> => ipcRenderer.invoke(IPC.NODES_STOP, id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke(IPC.NODES_REMOVE, id),
+    reapStuck: (): Promise<number> => ipcRenderer.invoke(IPC.NODES_REAP_STUCK),
     logs: (id: string): Promise<string[]> => ipcRenderer.invoke(IPC.NODES_LOGS, id),
     exportLogs: (req: NodeLogExportRequest): Promise<NodeLogExportResult> =>
       ipcRenderer.invoke(IPC.NODES_EXPORT_LOGS, req),
@@ -129,11 +141,15 @@ const api = {
       ipcRenderer.invoke(IPC.NODES_UPDATE_PRICING, req),
     backupMnemonic: (nodeId: string, mnemonic: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC.NODES_BACKUP_MNEMONIC, nodeId, mnemonic),
+    exportMnemonic: (nodeId: string, mnemonic: string): Promise<MnemonicExportResult> =>
+      ipcRenderer.invoke(IPC.NODES_EXPORT_MNEMONIC, nodeId, mnemonic),
     revealMnemonic: (
       nodeId: string,
     ): Promise<{ ok: true; mnemonic: string } | { ok: false; error: string }> =>
       ipcRenderer.invoke(IPC.NODES_REVEAL_MNEMONIC, nodeId),
     onChanged: (cb: () => void) => subscribe<null>(IPC.NODES_CHANGED, () => cb()),
+    onLiveStatus: (cb: (u: NodeLiveStatusUpdate) => void) =>
+      subscribe<NodeLiveStatusUpdate>(IPC.NODES_LIVE_STATUS, cb),
   },
 
   cli: {

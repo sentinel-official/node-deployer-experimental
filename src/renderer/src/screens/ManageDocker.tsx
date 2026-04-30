@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
+import { fmtAmount, fmtBytes } from '../lib/format';
 import type { DockerOverview } from '../../../shared/types';
 
 const REFRESH_MS = 5000;
@@ -146,7 +147,7 @@ export function ManageDocker() {
         body:
           r.removed === 0
             ? 'No dangling images found.'
-            : `${r.removed} image${r.removed === 1 ? '' : 's'} removed · ${formatBytes(r.reclaimedBytes)} reclaimed.`,
+            : `${r.removed} image${r.removed === 1 ? '' : 's'} removed · ${fmtBytes(r.reclaimedBytes)} reclaimed.`,
         tone: 'success',
       });
     } catch (e) {
@@ -174,8 +175,11 @@ export function ManageDocker() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0 overflow-auto">
-        <div className="col-span-12 lg:col-span-8 flex flex-col gap-3 min-h-0">
+      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
+        <div
+          className="col-span-12 lg:col-span-8 flex flex-col gap-3 min-h-0"
+          style={{ overflowY: 'auto' }}
+        >
           <DaemonCard
             overview={overview}
             loaded={loaded}
@@ -187,7 +191,10 @@ export function ManageDocker() {
           <SentinelImagesCard overview={overview} loaded={loaded} onPrune={onPrune} busy={busy} />
         </div>
 
-        <div className="col-span-12 lg:col-span-4 flex flex-col gap-3 min-h-0">
+        <div
+          className="col-span-12 lg:col-span-4 flex flex-col gap-3 min-h-0"
+          style={{ overflowY: 'auto' }}
+        >
           {loaded && overview?.reachable && (
             <ActionsCard
               overview={overview}
@@ -278,7 +285,7 @@ function DaemonCard({
             />
             <Stat
               label="Image disk"
-              value={loaded && overview ? formatBytes(overview.images.sizeBytes) : '—'}
+              value={loaded && overview ? fmtBytes(overview.images.sizeBytes) : '—'}
             />
           </div>
         ) : (
@@ -364,7 +371,10 @@ function SentinelContainersCard({
             No containers found with the <code className="mono-inline">sentinel-dvpn-</code> prefix.
           </div>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div
+            className="flex flex-col gap-1"
+            style={{ maxHeight: 220, overflowY: 'auto' }}
+          >
             {list.map((c) => (
               <div
                 key={c.id}
@@ -454,7 +464,10 @@ function SentinelImagesCard({
             No <code className="mono-inline">sentinel-dvpnx</code> images cached yet.
           </div>
         ) : (
-          <div className="flex flex-col gap-1">
+          <div
+            className="flex flex-col gap-1"
+            style={{ maxHeight: 220, overflowY: 'auto' }}
+          >
             {list.map((img) => (
               <div
                 key={img.id}
@@ -465,7 +478,7 @@ function SentinelImagesCard({
                   {img.tag}
                 </span>
                 <span className="ml-2 flex-shrink-0" style={{ color: 'var(--text-muted)' }}>
-                  {formatBytes(img.sizeBytes)}
+                  {fmtBytes(img.sizeBytes)}
                 </span>
               </div>
             ))}
@@ -564,9 +577,8 @@ function ActionsCard({
             className="text-[11px] leading-relaxed mt-1 pt-2"
             style={{ borderTop: '1px solid var(--border)', color: 'var(--text-dim)' }}
           >
-            Force-quit is a last-resort recovery action. Use it only when Docker Desktop is
-            stuck on "Starting the Docker Engine…" and the tray menu is unresponsive. All
-            local node earnings will be paused until Docker is restarted.
+            Last resort when Docker Desktop is stuck starting and the tray
+            menu won't respond. Local nodes stop earning until Docker is back.
           </div>
         )}
       </div>
@@ -581,27 +593,87 @@ function SystemCard({
   overview: DockerOverview | null;
   loaded: boolean;
 }) {
+  const { pushToast } = useApp();
   // Hide once we know Docker isn't reachable. While loading, render a
   // skeleton with placeholder rows so the right column is the same height
   // it'll be after data arrives.
   if (loaded && !overview?.reachable) return null;
+  const ramReserved =
+    overview?.totalMemoryMb
+      ? `${fmtAmount(overview.totalMemoryMb / 1024, 1)} GB`
+      : '—';
+  const coresReserved = overview?.ncpu ? String(overview.ncpu) : '—';
+  const isLinux = window.api.platform === 'linux';
+  const onOpenSettings = async () => {
+    const r = await window.api.docker.openSettings();
+    if (r.ok) {
+      pushToast({
+        title: 'Opening Docker Desktop',
+        body: 'In Docker Desktop, click the gear icon and choose Resources to change RAM and CPU.',
+        tone: 'info',
+      });
+    } else {
+      pushToast({
+        title: 'Unable to open Docker Desktop',
+        body: r.error ?? 'Open Docker Desktop manually and go to Settings → Resources.',
+        tone: 'warn',
+      });
+    }
+  };
   return (
     <div className="card">
       <div className="card-header">
-        <div className="card-title">System</div>
+        <div className="card-title flex items-center gap-2">
+          <MIcon name="tune" size={14} />
+          Resource reservations
+        </div>
       </div>
-      <div className="card-body flex flex-col gap-1.5 text-xs">
-        <Row k="Engine" v={overview?.version ?? '—'} />
-        <Row k="API" v={overview?.apiVersion ?? '—'} />
-        <Row k="OS" v={overview?.os ?? '—'} />
-        <Row k="Kernel" v={overview?.kernel ?? '—'} />
-        <Row k="Arch" v={overview?.arch ?? '—'} />
-        <Row k="CPUs" v={overview?.ncpu ? String(overview.ncpu) : '—'} />
-        <Row
-          k="Memory"
-          v={overview?.totalMemoryMb ? `${(overview.totalMemoryMb / 1024).toFixed(1)} GB` : '—'}
-        />
-        <Row k="Root dir" v={overview?.rootDir ?? '—'} mono />
+      <div className="card-body flex flex-col gap-3">
+        <div className="grid grid-cols-2 gap-2">
+          <Stat
+            label="RAM reserved"
+            value={ramReserved}
+            help="Memory Docker Desktop has set aside for containers. Change this in Docker Desktop → Settings → Resources."
+          />
+          <Stat
+            label="Cores reserved"
+            value={coresReserved}
+            help="Logical CPU cores Docker Desktop has set aside for containers. Change this in Docker Desktop → Settings → Resources."
+          />
+        </div>
+        <div className="text-[11px] leading-snug" style={{ color: 'var(--text-dim)' }}>
+          Bigger reservations let one node serve more concurrent users.
+          {isLinux
+            ? ' On Linux, edit /etc/docker/daemon.json and restart the daemon.'
+            : ' Edit these in Docker Desktop → Settings → Resources.'}
+        </div>
+        {!isLinux && (
+          <button
+            className="btn btn-secondary btn-sm w-full"
+            onClick={() => void onOpenSettings()}
+            title="Brings Docker Desktop to the front. Once it's open, click the gear icon and choose Resources. Changing reservations there triggers a Docker restart, which stops running containers."
+          >
+            <MIcon name="open_in_new" size={12} />
+            Open Docker Desktop
+          </button>
+        )}
+        <div
+          className="flex flex-col gap-1.5 text-xs pt-2"
+          style={{ borderTop: '1px solid var(--border)' }}
+        >
+          <div
+            className="text-[10px] uppercase tracking-wider"
+            style={{ color: 'var(--text-dim)' }}
+          >
+            Daemon
+          </div>
+          <Row k="Engine" v={overview?.version ?? '—'} />
+          <Row k="API" v={overview?.apiVersion ?? '—'} />
+          <Row k="OS" v={overview?.os ?? '—'} />
+          <Row k="Kernel" v={overview?.kernel ?? '—'} />
+          <Row k="Arch" v={overview?.arch ?? '—'} />
+          <Row k="Root dir" v={overview?.rootDir ?? '—'} mono />
+        </div>
       </div>
     </div>
   );
@@ -622,7 +694,17 @@ function Row({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   );
 }
 
-function Stat({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+function Stat({
+  label,
+  value,
+  accent,
+  help,
+}: {
+  label: string;
+  value: string;
+  accent?: boolean;
+  help?: string;
+}) {
   return (
     <div
       className="flex flex-col items-center justify-center text-center gap-1 px-3 py-4 rounded"
@@ -631,6 +713,7 @@ function Stat({ label, value, accent }: { label: string; value: string; accent?:
         border: '1px solid var(--border)',
         minHeight: 78,
       }}
+      title={help}
     >
       <div
         className="text-[10px] uppercase tracking-wider"
@@ -661,14 +744,3 @@ function reasonHeadline(reason: DockerOverview['reason']): string {
   }
 }
 
-function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
-  }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}

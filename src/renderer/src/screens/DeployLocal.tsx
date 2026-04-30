@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
+import { fmtDVPN } from '../lib/format';
 import type { LocalSystemReport, VpnServiceType } from '../../../shared/types';
 
 const DEPLOY_MIN_DVPN = 1.05;
@@ -132,8 +133,8 @@ export function DeployLocal() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        <div className="card col-span-12 lg:col-span-8 flex flex-col min-h-0 overflow-hidden">
+      <div className="grid grid-cols-12 gap-3">
+        <div className="card col-span-12 lg:col-span-8 flex flex-col overflow-hidden">
           <div className="card-header">
             <div className="flex items-center gap-3">
               <div
@@ -156,7 +157,7 @@ export function DeployLocal() {
             <span className="chip chip-accent">Local</span>
           </div>
 
-          <div className="card-body flex flex-col gap-2 flex-1 min-h-0">
+          <div className="card-body flex flex-col gap-2">
             <SystemChecksRow report={report} />
 
             <div className="grid grid-cols-12 gap-2">
@@ -234,31 +235,21 @@ export function DeployLocal() {
             )}
 
             {!fundsOk && wallet && (
-              <div className="callout callout-warn py-2">
-                <div className="flex items-start gap-2">
-                  <MIcon name="account_balance_wallet" size={14} style={{ marginTop: 2 }} />
-                  <div className="flex-1">
-                    <div className="text-xs font-semibold" style={{ color: 'var(--text)' }}>
-                      App wallet has {walletBalance.toFixed(4)} DVPN — needs at least{' '}
-                      {DEPLOY_MIN_DVPN.toFixed(2)} DVPN to deploy.
-                    </div>
-                    <div
-                      className="text-[11px] mt-0.5"
-                      style={{ color: 'var(--text-muted)' }}
-                    >
-                      The deploy seeds 1 DVPN to the new operator address (plus a small gas
-                      buffer). Top up the app wallet and try again.
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => navigate({ name: 'wallet' })}
-                      className="btn btn-secondary mt-1.5"
-                    >
-                      Open Wallet
-                      <MIcon name="arrow_forward" size={14} />
-                    </button>
-                  </div>
-                </div>
+              <div className="callout callout-warn text-xs flex items-center gap-2 py-1.5">
+                <MIcon name="account_balance_wallet" size={14} />
+                <span className="flex-1">
+                  Your app wallet has <b>{fmtDVPN(walletBalance, 4)} P2P</b>. You need{' '}
+                  <b>{fmtDVPN(DEPLOY_MIN_DVPN, 2)} P2P</b> to start a new node
+                  (1 P2P for the node, plus a small amount for network fees).
+                </span>
+                <button
+                  type="button"
+                  onClick={() => navigate({ name: 'wallet' })}
+                  className="btn btn-secondary btn-sm flex-shrink-0"
+                >
+                  Open Wallet
+                  <MIcon name="arrow_forward" size={12} />
+                </button>
               </div>
             )}
             {atCap && (
@@ -390,7 +381,7 @@ export function DeployLocal() {
               </div>
             )}
 
-            <div className="mt-auto pt-1">
+            <div className="pt-1">
               <button
                 onClick={startLocal}
                 disabled={!report || starting || !localReady}
@@ -416,6 +407,8 @@ export function DeployLocal() {
           </div>
 
           <CurrentRules />
+
+          <OnChainSpecsCard />
 
           <a
             className="text-xs inline-flex items-center gap-1"
@@ -657,6 +650,33 @@ function CurrentRules() {
         <Bullet>Maximum nodes per country: 300.</Bullet>
         <Bullet>Maximum nodes per city: 20.</Bullet>
         <Bullet>Maximum nodes per ASN: 50.</Bullet>
+      </div>
+    </div>
+  );
+}
+
+function OnChainSpecsCard() {
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div className="card-title">On-chain hardware reporting</div>
+      </div>
+      <div
+        className="card-body flex flex-col gap-2 text-xs"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        <Bullet>
+          After deploy, the node publishes a 1 udvpn self-transfer from its own
+          operator address with a <code>specs:v1</code> memo.
+        </Bullet>
+        <Bullet>
+          The memo carries CPU model, total cores, RAM, and the slice reserved
+          for the dvpn-node container.
+        </Bullet>
+        <Bullet>
+          Operator-reported &mdash; not consensus-validated. Surfaced in
+          Activity as <em>Specs reporting</em> with the tx hash.
+        </Bullet>
       </div>
     </div>
   );

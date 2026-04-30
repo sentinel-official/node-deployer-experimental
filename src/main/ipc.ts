@@ -1,7 +1,6 @@
 import { BrowserWindow, app, dialog, ipcMain, safeStorage, shell } from 'electron';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 import QRCode from 'qrcode';
 import AdmZip from 'adm-zip';
 import {
@@ -11,6 +10,7 @@ import {
   type DeployRequest,
   type LocalSystemReport,
   type MetricsWindow,
+  type MnemonicExportResult,
   type NodeLogExportRequest,
   type NodeLogExportResult,
   type NodeWithdrawRequest,
@@ -47,11 +47,11 @@ import {
   nodeHistory,
   withdrawFromNode,
   updateNodePricing,
+  reapStuckNow,
 } from './services/nodes';
 import { listEvents } from './services/events';
 import { getSettings, updateSettings } from './services/settings';
 import {
-  dockerHealth,
   startDockerDesktop,
   resetDockerClient,
   dockerOverview,
@@ -61,6 +61,8 @@ import {
   forceQuitDockerDesktop,
 } from './services/docker';
 import { healthAll, invalidateHealthCache } from './services/sentinel-client';
+import { buildLocalSystemReport } from './services/system-report';
+import { startLiveStats, stopLiveStats } from './services/live-stats';
 import { logDir, log } from './services/logger';
 import { readStore, writeStore } from './services/store';
 import {
@@ -71,43 +73,113 @@ import {
 } from './services/cli-server';
 import { spawn } from 'node:child_process';
 
+// ─── IPC payload validators ──────────────────────────────────────────────────
+//
+// The renderer is sandboxed (contextIsolation), but we still treat every
+// IPC payload as untrusted: a renderer compromise is the most likely
+// attack vector for a desktop app. Validators throw on bad input so
+// `ipcMain.handle` returns a structured error to the caller instead of
+// silently passing malformed data into the service layer.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const HOSTNAME_RE = /^[a-zA-Z0-9.\-:_]{1,255}$/; // permits IPv4, hostnames, IPv6 in brackets is rejected here — refused on purpose
+const USERNAME_RE = /^[a-zA-Z0-9._\-]{1,32}$/;
+
+function vUUID(id: unknown, label: string): string {
+  if (typeof id !== 'string' || !UUID_RE.test(id)) {
+    throw new Error(`Invalid ${label}: expected UUID`);
+  }
+  return id;
+}
+
+function vSSHCredentials(raw: unknown): SSHCredentials {
+  if (!raw || typeof raw !== 'object') throw new Error('Invalid SSH credentials');
+  const c = raw as Record<string, unknown>;
+  const host = String(c.host ?? '');
+  if (!HOSTNAME_RE.test(host)) throw new Error('Invalid SSH host');
+  const port = Number(c.port ?? 22);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('Invalid SSH port');
+  }
+  const username = String(c.username ?? '');
+  if (!USERNAME_RE.test(username)) throw new Error('Invalid SSH username');
+  // password / privateKey / passphrase: pass-through. Length-bound only
+  // to avoid trivial DoS via gigabyte payloads.
+  const cap = (s: unknown, max: number) => {
+    if (s === undefined || s === null) return undefined;
+    const v = String(s);
+    if (v.length > max) throw new Error('SSH credential field too long');
+    return v;
+  };
+  return {
+    host,
+    port,
+    username,
+    password: cap(c.password, 4096),
+    privateKey: cap(c.privateKey, 32_768),
+    passphrase: cap(c.passphrase, 4096),
+  } as SSHCredentials;
+}
+
 function broadcast(channel: string, payload: unknown) {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, payload);
   }
 }
 
-async function reportLocalSystem(): Promise<LocalSystemReport> {
-  const platform = os.platform();
-  const memMb = Math.round(os.totalmem() / (1024 * 1024));
-  const osLabel =
-    platform === 'darwin'
-      ? `macOS ${os.release()}`
-      : platform === 'linux'
-      ? `Linux ${os.release()}`
-      : platform === 'win32'
-      ? `Windows ${os.release()}`
-      : `${platform} ${os.release()}`;
+// Token-bucket rate limiter: protects expensive / state-changing IPC
+// channels from a runaway renderer. Capacity = burst, refill = per-second.
+// All limiter state lives in-process and resets on app restart.
+type Bucket = { tokens: number; last: number };
+const RATE_BUCKETS = new Map<string, Bucket>();
+function rateOk(key: string, capacity: number, refillPerSec: number): boolean {
+  const now = Date.now();
+  const b = RATE_BUCKETS.get(key) ?? { tokens: capacity, last: now };
+  const elapsed = (now - b.last) / 1000;
+  b.tokens = Math.min(capacity, b.tokens + elapsed * refillPerSec);
+  b.last = now;
+  if (b.tokens < 1) {
+    RATE_BUCKETS.set(key, b);
+    return false;
+  }
+  b.tokens -= 1;
+  RATE_BUCKETS.set(key, b);
+  return true;
+}
+function enforceRate(key: string, capacity: number, refillPerSec: number): void {
+  if (!rateOk(key, capacity, refillPerSec)) {
+    throw new Error('You\'re going a bit too fast. Please wait a few seconds and try again.');
+  }
+}
 
-  const health = await dockerHealth();
-  return {
-    osCompatible: ['darwin', 'linux', 'win32'].includes(platform),
-    osLabel,
-    memoryMb: memMb,
-    memoryOk: memMb >= 2048,
-    diskFreeGb: 50,
-    diskOk: true,
-    dockerInstalled: health.reachable || (health.desktop?.installed ?? false),
-    dockerVersion: health.version,
-    dockerReachable: health.reachable,
-    dockerError: health.error,
-    dockerReason: health.reason,
-    dockerDesktop: health.desktop,
-  };
+// Convert a thrown error into a user-safe message: strip stack frames,
+// absolute paths (which may contain the OS username), and runaway length.
+// The full error is still logged via the main-process logger for triage.
+function toUserError(err: unknown, ctx?: string): string {
+  const raw = err instanceof Error ? err.message : String(err ?? 'Unknown error');
+  let msg = raw.split('\n')[0] ?? raw;
+  // Replace any Windows or POSIX absolute path with a placeholder.
+  msg = msg.replace(/[A-Za-z]:\\[^\s'"]+/g, '<path>');
+  msg = msg.replace(/\/(?:home|Users|root|etc|var|tmp)\/[^\s'"]+/g, '<path>');
+  if (msg.length > 400) msg = msg.slice(0, 400) + '…';
+  if (ctx) log.warn(`ipc handler error: ${ctx}`, { err: String(err) });
+  return msg;
+}
+
+async function reportLocalSystem(): Promise<LocalSystemReport> {
+  return buildLocalSystemReport();
 }
 
 export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.SYSTEM_REPORT, reportLocalSystem);
+  ipcMain.handle(IPC.SYSTEM_LIVE_STATS_START, () => {
+    startLiveStats();
+    return { ok: true };
+  });
+  ipcMain.handle(IPC.SYSTEM_LIVE_STATS_STOP, () => {
+    stopLiveStats();
+    return { ok: true };
+  });
   ipcMain.handle(IPC.DOCKER_START, async () => {
     const result = await startDockerDesktop();
     // Clear the cached Docker client so once the daemon finishes booting,
@@ -119,6 +191,25 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.DOCKER_OVERVIEW, () => dockerOverview());
   ipcMain.handle(IPC.DOCKER_STOP_ALL_SENTINEL, () => stopAllSentinelContainers());
   ipcMain.handle(IPC.DOCKER_PRUNE, () => pruneDangling());
+  ipcMain.handle(IPC.DOCKER_OPEN_SETTINGS, async () => {
+    // Docker Desktop has no public deep-link to the Resources pane (the
+    // `docker-desktop://` scheme only handles launch + OAuth callbacks),
+    // so we just bring Docker Desktop itself to the front and the
+    // renderer tells the user to navigate to Settings → Resources. On
+    // Linux there is no Docker Desktop GUI.
+    if (process.platform === 'linux') {
+      return {
+        ok: false,
+        error: 'On Linux, Docker resources are configured via /etc/docker/daemon.json and a daemon restart.',
+      };
+    }
+    const result = await startDockerDesktop();
+    if (result.started) return { ok: true };
+    return {
+      ok: false,
+      error: result.error ?? 'Docker Desktop could not be opened.',
+    };
+  });
   ipcMain.handle(IPC.DOCKER_QUIT, async () => {
     const result = await quitDockerDesktop();
     resetDockerClient();
@@ -145,7 +236,10 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.WALLET_CREATE, () => createWallet());
   ipcMain.handle(IPC.WALLET_RESTORE, (_e, mnemonic: string) => restoreWallet(mnemonic));
   ipcMain.handle(IPC.WALLET_REFRESH_BALANCE, () => refreshWalletBalance());
-  ipcMain.handle(IPC.WALLET_SEND, (_e, req: SendTxRequest) => sendTokens(req));
+  ipcMain.handle(IPC.WALLET_SEND, (_e, req: SendTxRequest) => {
+    enforceRate('wallet-send', 5, 0.5); // 5 burst, ~one every 2s after that
+    return sendTokens(req);
+  });
   ipcMain.handle(IPC.WALLET_QR, (_e, text: string) =>
     QRCode.toString(text, {
       type: 'svg',
@@ -157,16 +251,25 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(IPC.WALLET_LOGOUT, () => logoutWallet());
 
   // -- Events ----------------------------------------------------------------
-  ipcMain.handle(IPC.EVENTS_LIST, (_e, limit?: number) => listEvents(limit));
+  ipcMain.handle(IPC.EVENTS_LIST, (_e, limit?: number) => {
+    const safeLimit =
+      typeof limit === 'number' && Number.isFinite(limit) && limit > 0
+        ? Math.min(Math.floor(limit), 1000)
+        : undefined;
+    return listEvents(safeLimit);
+  });
 
   // -- SSH -------------------------------------------------------------------
   ipcMain.handle(
     IPC.SSH_TEST,
-    (_e, creds: SSHCredentials): Promise<SSHTestResult> => testSSHConnection(creds),
+    (_e, creds: SSHCredentials): Promise<SSHTestResult> =>
+      testSSHConnection(vSSHCredentials(creds)),
   );
 
   // -- Deploy ----------------------------------------------------------------
   ipcMain.handle(IPC.DEPLOY_START, async (_e, req: DeployRequest) => {
+    enforceRate('deploy-start', 3, 0.2); // 3 burst, then 1 every 5s
+    if (req && typeof req === 'object' && req.ssh) vSSHCredentials(req.ssh);
     await primeDeploySettings();
     return startDeploy(req, (progress: DeployProgress) => {
       broadcast(IPC.DEPLOY_PROGRESS, progress);
@@ -179,34 +282,39 @@ export function registerIpcHandlers(): void {
 
   // -- Nodes -----------------------------------------------------------------
   ipcMain.handle(IPC.NODES_LIST, () => listNodes());
-  ipcMain.handle(IPC.NODES_GET, (_e, id: string) => getNode(id));
-  ipcMain.handle(IPC.NODES_RESTART, (_e, id: string) => restartNode(id));
-  ipcMain.handle(IPC.NODES_STOP, (_e, id: string) => stopNode(id));
-  ipcMain.handle(IPC.NODES_START, (_e, id: string) => startNode(id));
-  ipcMain.handle(IPC.NODES_REMOVE, (_e, id: string) => removeNode(id));
-  ipcMain.handle(IPC.NODES_LOGS, (_e, id: string) => recentLogs(id));
+  ipcMain.handle(IPC.NODES_GET, (_e, id: string) => getNode(vUUID(id, 'node id')));
+  ipcMain.handle(IPC.NODES_RESTART, (_e, id: string) => restartNode(vUUID(id, 'node id')));
+  ipcMain.handle(IPC.NODES_STOP, (_e, id: string) => stopNode(vUUID(id, 'node id')));
+  ipcMain.handle(IPC.NODES_START, (_e, id: string) => startNode(vUUID(id, 'node id')));
+  ipcMain.handle(IPC.NODES_REMOVE, (_e, id: string) => removeNode(vUUID(id, 'node id')));
+  ipcMain.handle(IPC.NODES_REAP_STUCK, () => reapStuckNow());
+  ipcMain.handle(IPC.NODES_LOGS, (_e, id: string) => recentLogs(vUUID(id, 'node id')));
   ipcMain.handle(
     IPC.NODES_EXPORT_LOGS,
     async (_e, req: NodeLogExportRequest): Promise<NodeLogExportResult> =>
       exportNodeLogs(req),
   );
-  ipcMain.handle(IPC.NODES_STATUS, (_e, id: string) => nodeStatus(id));
+  ipcMain.handle(IPC.NODES_STATUS, (_e, id: string) => nodeStatus(vUUID(id, 'node id')));
   ipcMain.handle(IPC.NODES_HISTORY, (_e, id: string, window: MetricsWindow) =>
-    nodeHistory(id, window),
+    nodeHistory(vUUID(id, 'node id'), window),
   );
   ipcMain.handle(IPC.NODES_WITHDRAW, async (_e, req: NodeWithdrawRequest) => {
+    enforceRate('nodes-withdraw', 5, 0.5);
+    vUUID(req?.nodeId, 'node id');
     const store = await readStore();
     const to = req.to ?? store.wallet?.address;
     if (!to) return { ok: false, error: 'No destination: app wallet not set up.' };
     return withdrawFromNode(req.nodeId, to, req.amountDVPN);
   });
-  ipcMain.handle(IPC.NODES_UPDATE_PRICING, async (_e, req: UpdateNodePricingRequest) =>
-    updateNodePricing(req.nodeId, req.gigabytePriceDVPN, req.hourlyPriceDVPN, {
+  ipcMain.handle(IPC.NODES_UPDATE_PRICING, async (_e, req: UpdateNodePricingRequest) => {
+    enforceRate('nodes-update-pricing', 5, 0.5);
+    vUUID(req?.nodeId, 'node id');
+    return updateNodePricing(req.nodeId, req.gigabytePriceDVPN, req.hourlyPriceDVPN, {
       priceMode: req.priceMode,
       usdGigabytePrice: req.usdGigabytePrice,
       usdHourlyPrice: req.usdHourlyPrice,
-    }),
-  );
+    });
+  });
 
   ipcMain.handle(IPC.NODES_BACKUP_MNEMONIC, async (_e, nodeId: string, mnemonic: string) => {
     if (!safeStorage.isEncryptionAvailable()) {
@@ -217,6 +325,36 @@ export function registerIpcHandlers(): void {
     await writeStore(store);
     return { ok: true };
   });
+
+  ipcMain.handle(
+    IPC.NODES_EXPORT_MNEMONIC,
+    async (_e, nodeId: string, mnemonic: string): Promise<MnemonicExportResult> => {
+      vUUID(nodeId, 'node id');
+      if (typeof mnemonic !== 'string' || !mnemonic.trim()) {
+        return { ok: false, error: 'No mnemonic to export.' };
+      }
+      const date = new Date().toISOString().split('T')[0];
+      const { filePath, canceled } = await dialog.showSaveDialog({
+        title: 'Export recovery phrase',
+        defaultPath: `sentinel-recovery-${nodeId.slice(0, 8)}-${date}.txt`,
+        filters: [{ name: 'Text file', extensions: ['txt'] }],
+      });
+      if (canceled || !filePath) return { ok: false, cancelled: true };
+      try {
+        const body =
+          `# Sentinel node recovery phrase\n` +
+          `# Node: ${nodeId}\n` +
+          `# Exported: ${new Date().toISOString()}\n` +
+          `# Keep this file offline. Anyone with these words can control the operator wallet.\n\n` +
+          `${mnemonic.trim()}\n`;
+        await fs.writeFile(filePath, body, { encoding: 'utf8', mode: 0o600 });
+        shell.showItemInFolder(filePath);
+        return { ok: true, path: filePath };
+      } catch (err) {
+        return { ok: false, error: toUserError(err, 'mnemonic-export') };
+      }
+    },
+  );
 
   ipcMain.handle(IPC.NODES_REVEAL_MNEMONIC, async (_e, nodeId: string) => {
     const store = await readStore();
@@ -235,7 +373,7 @@ export function registerIpcHandlers(): void {
       const mnemonic = safeStorage.decryptString(Buffer.from(blob, 'base64'));
       return { ok: true, mnemonic };
     } catch (err) {
-      return { ok: false, error: `Failed to decrypt backup: ${(err as Error).message}` };
+      return { ok: false, error: `Failed to decrypt backup: ${toUserError(err, 'mnemonic-decrypt')}` };
     }
   });
 
@@ -245,11 +383,14 @@ export function registerIpcHandlers(): void {
     try {
       return await startCliServer();
     } catch (err) {
-      return { ...getCliState(), error: (err as Error).message };
+      return { ...getCliState(), error: toUserError(err, 'cli-start') };
     }
   });
   ipcMain.handle(IPC.CLI_STOP, () => stopCliServer());
-  ipcMain.handle(IPC.CLI_RUN, async (_e, line: string) => runFromApp(line));
+  ipcMain.handle(IPC.CLI_RUN, async (_e, line: string) => {
+    enforceRate('cli-run', 10, 5); // 10-burst, 5/sec sustained
+    return runFromApp(line);
+  });
   ipcMain.handle(IPC.CLI_OPEN_POWERSHELL, async () => {
     const state = getCliState();
     if (state.status === 'off') {
@@ -296,7 +437,7 @@ export function registerIpcHandlers(): void {
       child.unref();
       return { ok: true };
     } catch (err) {
-      return { ok: false, error: (err as Error).message };
+      return { ok: false, error: toUserError(err, 'cli-open-powershell') };
     }
   });
 
@@ -459,6 +600,6 @@ async function exportNodeLogs(req: NodeLogExportRequest): Promise<NodeLogExportR
     shell.showItemInFolder(filePath);
     return { ok: true, path: filePath };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    return { ok: false, error: toUserError(err, 'export-diagnostics') };
   }
 }

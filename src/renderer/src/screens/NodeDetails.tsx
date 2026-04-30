@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { BarChart } from '../components/BarChart';
 import { QRCode } from '../components/QRCode';
 import { MIcon } from '../components/MIcon';
 import { CountryFlag } from '../components/CountryFlag';
 import { useApp } from '../store/app';
-import { fmtDVPN, shortAddr } from '../lib/format';
+import { fmtDVPN, fmtBytes, shortAddr } from '../lib/format';
 import type {
   DeployedNode,
   MetricsSample,
@@ -20,7 +21,7 @@ interface Props {
 export function NodeDetails({ id }: Props) {
   const { nodes, wallet, navigate, refreshStatus, liveStatuses, refreshNodes, pushToast, confirm } = useApp();
   const node = useMemo(() => nodes.find((n) => n.id === id) ?? null, [nodes, id]);
-  const [status, setStatus] = useState<NodeLiveStatus | null>(null);
+  const status = liveStatuses[id] ?? null;
   const [history, setHistory] = useState<MetricsSample[]>([]);
   const [range, setRange] = useState<'1h' | '24h' | '7d'>('24h');
   const [busy, setBusy] = useState<'' | 'start' | 'restart' | 'stop' | 'remove' | 'withdraw' | 'pricing'>('');
@@ -33,24 +34,34 @@ export function NodeDetails({ id }: Props) {
   const [revealLoading, setRevealLoading] = useState(false);
 
   useEffect(() => {
+    if (!node) return;
     let mounted = true;
-    const tick = async () => {
-      const s = await refreshStatus(id);
-      if (!mounted) return;
-      setStatus(s);
-      const h = await window.api.nodes.history(id, range);
-      if (!mounted) return;
-      setHistory(h);
+    const tick = () => {
+      void refreshStatus(id).catch(() => {});
     };
-    void tick();
-    const iv = setInterval(tick, 15_000);
+    tick();
+    const iv = setInterval(() => {
+      if (mounted) tick();
+    }, 15_000);
     return () => {
       mounted = false;
       clearInterval(iv);
     };
-  }, [id, refreshStatus, range]);
+  }, [id, node, refreshStatus]);
 
-  useEffect(() => setStatus(liveStatuses[id] ?? null), [liveStatuses, id]);
+  useEffect(() => {
+    if (!node) return;
+    let mounted = true;
+    void window.api.nodes
+      .history(id, range)
+      .then((h) => {
+        if (mounted) setHistory(h);
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [id, node, range]);
 
   const chartSamples = useMemo(
     () => history.map((s) => ({ ts: s.ts, peers: s.peers })),
@@ -65,11 +76,26 @@ export function NodeDetails({ id }: Props) {
           : 7 * 24 * 60 * 60 * 1000,
     [range],
   );
-  // Earliest meaningful x-axis value: prefer the node's own startedAt (the
-  // moment the process most recently came up), fall back to createdAt, and
-  // finally the first sample's timestamp. Without this, a node that's been
-  // alive for 10 minutes renders one bar against a 24-hour empty axis.
+  // Earliest meaningful x-axis value.
+  // - On the daily ("24h") range the user reads the chart as "today's peers",
+  //   so we start at today's midnight and let the axis run forward toward
+  //   `now`. If the node started later than midnight we floor to that.
+  // - On other ranges we fall back to the earliest meaningful timestamp
+  //   (startedAt / createdAt / first sample) so a young node doesn't render
+  //   against a mostly-empty axis.
   const chartMinStartMs = useMemo(() => {
+    if (range === '24h') {
+      const midnight = new Date();
+      midnight.setHours(0, 0, 0, 0);
+      const startCandidates = [midnight.getTime()];
+      if (node?.startedAt) {
+        const t = Date.parse(node.startedAt);
+        if (Number.isFinite(t)) startCandidates.push(t);
+      }
+      // Latest of {midnight, startedAt} so a node started this afternoon
+      // doesn't show empty axis from midnight onward.
+      return Math.max(...startCandidates);
+    }
     const candidates: number[] = [];
     if (node?.startedAt) candidates.push(Date.parse(node.startedAt));
     if (node?.createdAt) candidates.push(Date.parse(node.createdAt));
@@ -77,10 +103,10 @@ export function NodeDetails({ id }: Props) {
     const valid = candidates.filter((n) => Number.isFinite(n));
     if (valid.length === 0) return undefined;
     return Math.min(...valid);
-  }, [node?.startedAt, node?.createdAt, history]);
+  }, [range, node?.startedAt, node?.createdAt, history]);
 
   const parsedLogs = useMemo(
-    () => (status?.logTail ?? []).map((l) => parseLogLine(l)),
+    () => (status?.logTail ?? []).slice(-300).map((l) => parseLogLine(l)),
     [status?.logTail],
   );
   const logScrollRef = useRef<HTMLDivElement | null>(null);
@@ -90,6 +116,42 @@ export function NodeDetails({ id }: Props) {
     if (!el || !logAutoScrollRef.current) return;
     el.scrollTop = el.scrollHeight;
   }, [parsedLogs]);
+
+  // Anchor uptime to wall-clock so it ticks every second locally instead of
+  // jumping at poll boundaries. Hooks must run on every render path — keep
+  // them above the `!node` early return.
+  //
+  // The anchor is `Date.now() - status.uptimeMs` from the *first* sample
+  // we see. We deliberately do NOT re-anchor on every status push: doing
+  // that causes a visible 1–2s stutter every poll when server-reported
+  // uptime drifts from local wall-clock by network/poll jitter. We only
+  // resync when divergence exceeds 5s (e.g. container restart, clock
+  // skew, or coming back from sleep).
+  const uptimeAnchorRef = useRef<number | null>(null);
+  const hasUptime = !!(status?.uptimeMs && status.uptimeMs > 0);
+  useEffect(() => {
+    const ms = status?.uptimeMs ?? 0;
+    if (ms <= 0) {
+      uptimeAnchorRef.current = null;
+      return;
+    }
+    const incomingAnchor = Date.now() - ms;
+    const current = uptimeAnchorRef.current;
+    if (current == null) {
+      uptimeAnchorRef.current = incomingAnchor;
+      return;
+    }
+    // Resync only on meaningful drift to avoid the visible stutter.
+    if (Math.abs(current - incomingAnchor) > 5_000) {
+      uptimeAnchorRef.current = incomingAnchor;
+    }
+  }, [status?.uptimeMs]);
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!hasUptime) return;
+    const iv = setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => clearInterval(iv);
+  }, [hasUptime]);
 
   if (!node) {
     return (
@@ -186,11 +248,19 @@ export function NodeDetails({ id }: Props) {
 
   const openWithdraw = () => {
     if (!wallet?.address) {
-      pushToast({ title: 'App wallet not set up', tone: 'error' });
+      pushToast({
+        title: 'No app wallet yet',
+        body: 'Set up the app wallet first so we know where to send the P2P.',
+        tone: 'error',
+      });
       return;
     }
     if (!(node.balanceDVPN > 0.001)) {
-      pushToast({ title: 'Nothing to withdraw', body: 'Node balance is effectively zero.', tone: 'warn' });
+      pushToast({
+        title: 'Nothing to withdraw',
+        body: 'This node has not earned any P2P yet.',
+        tone: 'warn',
+      });
       return;
     }
     setWithdrawOpen(true);
@@ -242,7 +312,9 @@ export function NodeDetails({ id }: Props) {
     }
   };
 
-  const uptime = formatDuration(status?.uptimeMs ?? 0);
+  const uptime = uptimeAnchorRef.current == null
+    ? formatDuration(0)
+    : formatDuration(Date.now() - uptimeAnchorRef.current);
   const statusTone =
     node.status === 'online'
       ? 'chip-success'
@@ -291,6 +363,17 @@ export function NodeDetails({ id }: Props) {
             <button className="btn btn-secondary" onClick={() => void refreshStatus(id)}>
               <MIcon name="refresh" size={14} />
               Refresh
+            </button>
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                setRevealedMnemonic(null);
+                setRevealOpen(true);
+              }}
+              title="Decrypt and show this node's 24-word operator recovery phrase"
+            >
+              <MIcon name="key" size={14} />
+              Recovery phrase
             </button>
             {node.status === 'offline' ? (
               <button className="btn btn-primary" onClick={onStart} disabled={!!busy}>
@@ -360,10 +443,10 @@ export function NodeDetails({ id }: Props) {
         </div>
         <div className="stat-card col-span-6 lg:col-span-3">
           <div className="stat-label">Active sessions</div>
-          <div className="stat-value">{status?.reachable ? String(status.sessions) : '—'}</div>
+          <div className="stat-value">{status?.reachable ? status.sessions.toLocaleString() : '—'}</div>
           <div className="stat-sub">
             {status?.reachable
-              ? formatBytes(status.bytesIn + status.bytesOut) + ' served'
+              ? fmtBytes(status.bytesIn + status.bytesOut) + ' served'
               : 'waiting'}
           </div>
         </div>
@@ -425,6 +508,62 @@ export function NodeDetails({ id }: Props) {
             </div>
           </div>
 
+          <div className="card flex flex-col overflow-hidden">
+            <div className="card-header">
+              <div className="card-title flex items-center gap-2">
+                <MIcon name="receipt_long" size={13} />
+                Plans
+              </div>
+              {status && (
+                <span className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+                  {(status.linkedPlans ?? []).length} linked
+                </span>
+              )}
+            </div>
+            <div className="card-body" style={{ maxHeight: 240, overflowY: 'auto' }}>
+              {!status ? (
+                <div className="loading-state">Querying on-chain…</div>
+              ) : (status.linkedPlans ?? []).length === 0 ? (
+                <div className="empty-state" style={{ padding: '20px 12px' }}>
+                  <MIcon name="inbox" size={26} style={{ color: 'var(--text-muted)' }} />
+                  <div className="empty-state-body text-xs">
+                    Not linked to any plan. Operators add nodes to a plan via MsgLinkNode.
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(status.linkedPlans ?? []).slice(0, 50).map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center gap-3 px-3 py-2"
+                      style={{
+                        background: 'var(--bg-input)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-md)',
+                      }}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div
+                          className="mono-inline text-[12px] truncate"
+                          style={{ color: 'var(--text)' }}
+                          title={`Plan ${p.id}`}
+                        >
+                          #{p.id}
+                        </div>
+                        <div
+                          className="text-[10px]"
+                          style={{ color: 'var(--text-dim)' }}
+                        >
+                          {fmtDVPN(p.price, 6)} $P2P · {p.durationDays}d
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="card flex flex-col min-h-0 overflow-hidden flex-1">
             <div className="card-header">
               <div className="card-title flex items-center gap-2">
@@ -450,7 +589,7 @@ export function NodeDetails({ id }: Props) {
                 </div>
               ) : (
                 <div className="flex flex-col gap-2">
-                  {status.activeSubscriptions.map((s) => (
+                  {status.activeSubscriptions.slice(0, 50).map((s) => (
                     <div
                       key={s.id}
                       className="flex items-center gap-3 px-3 py-2"
@@ -477,7 +616,7 @@ export function NodeDetails({ id }: Props) {
                           className="text-[10px]"
                           style={{ color: 'var(--text-dim)' }}
                         >
-                          {formatBytes(s.bytesIn + s.bytesOut)} ·{' '}
+                          {fmtBytes(s.bytesIn + s.bytesOut)} ·{' '}
                           {formatDuration(s.durationSeconds * 1000)}
                         </div>
                       </div>
@@ -842,6 +981,24 @@ function KeyRow({ label, value, onCopy }: { label: string; value: string; onCopy
   );
 }
 
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="text-[10px] uppercase tracking-wide font-semibold"
+      style={{ color: 'var(--text-dim)' }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function dividerLeftStyle(): CSSProperties {
+  return {
+    borderTop: '1px solid var(--border)',
+    paddingTop: 12,
+  };
+}
+
 function IdentityDisclosure({
   node,
   status,
@@ -861,6 +1018,7 @@ function IdentityDisclosure({
   const region = node.region ?? '—';
   const hostPort = `${node.host ?? '127.0.0.1'}:${node.port}`;
   const countryLabel = node.countryName ?? node.country ?? region;
+
 
   return (
     <div className="card overflow-hidden">
@@ -887,8 +1045,12 @@ function IdentityDisclosure({
         <MIcon name={open ? 'expand_less' : 'expand_more'} size={16} />
       </button>
       {open && (
-        <div className="px-4 py-3 grid grid-cols-12 gap-3">
-          <div className="col-span-12 md:col-span-3 flex flex-col items-center gap-2">
+        <div
+          className="px-4 py-3 flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:gap-4 overflow-y-auto"
+          style={{ maxHeight: 'min(60vh, 520px)' }}
+        >
+          <section className="lg:col-span-3 flex flex-col items-center gap-2">
+            <SectionLabel>Address</SectionLabel>
             {operatorAddr ? (
               <>
                 <QRCode value={operatorAddr} size={120} />
@@ -901,8 +1063,12 @@ function IdentityDisclosure({
                 Awaiting operator key
               </div>
             )}
-          </div>
-          <div className="col-span-12 md:col-span-5 flex flex-col gap-1.5">
+          </section>
+          <section
+            className="lg:col-span-5 flex flex-col gap-1.5"
+            style={dividerLeftStyle()}
+          >
+            <SectionLabel>Identity</SectionLabel>
             {operatorAddr && (
               <KeyRow
                 label="Operator"
@@ -945,14 +1111,12 @@ function IdentityDisclosure({
               <MIcon name="key" size={12} />
               Reveal mnemonic
             </button>
-          </div>
-          <div className="col-span-12 md:col-span-4 flex flex-col gap-1.5">
-            <div
-              className="text-[10px] uppercase tracking-wide"
-              style={{ color: 'var(--text-dim)' }}
-            >
-              Pricing
-            </div>
+          </section>
+          <section
+            className="lg:col-span-4 flex flex-col gap-1.5"
+            style={dividerLeftStyle()}
+          >
+            <SectionLabel>Pricing</SectionLabel>
             <div className="flex items-center justify-between gap-2 text-[11px]">
               <span style={{ color: 'var(--text-dim)' }}>Per GB</span>
               <span className="mono-inline" style={{ color: 'var(--text)' }}>
@@ -965,13 +1129,149 @@ function IdentityDisclosure({
                 {`${fmtDVPN(node.hourlyPriceDVPN, 3)} $P2P`}
               </span>
             </div>
-            <button className="btn btn-secondary btn-sm mt-1" onClick={onEditPricing}>
+            <button className="btn btn-secondary btn-sm mt-1 self-start" onClick={onEditPricing}>
               <MIcon name="price_change" size={12} />
               Edit pricing
             </button>
-          </div>
+          </section>
+          <SpecsReportingPanel node={node} onCopy={onCopy} />
         </div>
       )}
+    </div>
+  );
+}
+
+function SpecsReportingPanel({
+  node,
+  onCopy,
+}: {
+  node: DeployedNode;
+  onCopy: (label: string, value: string) => void | Promise<void>;
+}) {
+  const specs = node.specs;
+  const txHash = node.specsTxHash;
+  const pending = node.specsPublishPending === true && !txHash;
+  const publishedAt = node.specsPublishedAt
+    ? new Date(node.specsPublishedAt).toLocaleString()
+    : null;
+  const explorerUrl = txHash ? `https://p2pscan.com/transactions/${txHash}` : null;
+  if (!specs && !txHash && !pending) return null;
+  return (
+    <div
+      className="col-span-12 mt-1 pt-3"
+      style={{ borderTop: '1px solid var(--border)' }}
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <MIcon name="receipt_long" size={13} style={{ color: 'var(--accent)' }} />
+        <div
+          className="text-[10px] uppercase tracking-wide"
+          style={{ color: 'var(--text-dim)' }}
+        >
+          On-chain hardware reporting
+        </div>
+        <span
+          className="chip"
+          style={{
+            background: 'var(--bg-input)',
+            border: '1px solid var(--border)',
+            color: 'var(--text-muted)',
+            fontSize: 10,
+          }}
+        >
+          specs:v1
+        </span>
+        {pending && (
+          <span
+            className="chip"
+            style={{
+              background: 'color-mix(in srgb, var(--yellow, #f5b04a) 12%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--yellow, #f5b04a) 50%, transparent)',
+              color: 'var(--text)',
+              fontSize: 10,
+            }}
+          >
+            Awaiting broadcast
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-12 gap-3 text-[11px]">
+        {specs && (
+          <div className="col-span-12 md:col-span-7 grid grid-cols-2 gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>CPU</span>
+              <span
+                className="mono-inline truncate"
+                style={{ color: 'var(--text)', maxWidth: '60%' }}
+                title={specs.cpu}
+              >
+                {specs.cpu || '—'}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>Cores</span>
+              <span className="mono-inline" style={{ color: 'var(--text)' }}>
+                {specs.cr}/{specs.c}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>RAM</span>
+              <span className="mono-inline" style={{ color: 'var(--text)' }}>
+                {Math.round(specs.r / 1024)} GiB
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>RAM reserved</span>
+              <span className="mono-inline" style={{ color: 'var(--text)' }}>
+                {Math.round(specs.rr / 1024)} GiB
+              </span>
+            </div>
+          </div>
+        )}
+        <div className="col-span-12 md:col-span-5 flex flex-col gap-1.5">
+          {publishedAt && (
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>Published</span>
+              <span style={{ color: 'var(--text)' }}>{publishedAt}</span>
+            </div>
+          )}
+          {txHash ? (
+            <div className="flex items-center justify-between gap-2">
+              <span style={{ color: 'var(--text-dim)' }}>Tx</span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  className="btn-ghost text-[11px] inline-flex items-center gap-1"
+                  onClick={() => void onCopy('Specs tx hash', txHash)}
+                  title="Copy tx hash"
+                >
+                  <MIcon name="content_copy" size={11} />
+                  <span className="mono-inline">{shortAddr(txHash, 8, 6)}</span>
+                </button>
+                {explorerUrl && (
+                  <a
+                    className="text-[11px] inline-flex items-center gap-0.5"
+                    style={{ color: 'var(--accent)' }}
+                    href={explorerUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="View on p2pscan"
+                  >
+                    View tx
+                    <MIcon name="open_in_new" size={11} />
+                  </a>
+                )}
+              </div>
+            </div>
+          ) : pending ? (
+            <div style={{ color: 'var(--text-dim)' }}>
+              Broadcast queued — will retry on next app start if it failed.
+            </div>
+          ) : (
+            <div style={{ color: 'var(--text-dim)' }}>
+              No specs tx recorded for this node.
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1408,14 +1708,3 @@ function LogRow({ line }: { line: ParsedLog }) {
   );
 }
 
-function formatBytes(n: number): string {
-  if (!n || n <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
-}

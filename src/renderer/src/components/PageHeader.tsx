@@ -1,11 +1,15 @@
 interface Props {
   title: string;
+  /**
+   * Accepted for backwards compatibility but no longer rendered — every
+   * page header is now title-only by design.
+   */
   subtitle?: string;
   right?: React.ReactNode;
   breadcrumb?: React.ReactNode;
 }
 
-export function PageHeader({ title, subtitle, right, breadcrumb }: Props) {
+export function PageHeader({ title, right, breadcrumb }: Props) {
   return (
     <div className="page-header">
       <div>
@@ -15,7 +19,6 @@ export function PageHeader({ title, subtitle, right, breadcrumb }: Props) {
           </div>
         )}
         <h1 className="page-title">{title}</h1>
-        {subtitle && <p className="page-subtitle">{subtitle}</p>}
       </div>
       {right && <div className="flex items-center gap-2 flex-wrap justify-end">{right}</div>}
     </div>

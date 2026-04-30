@@ -77,7 +77,7 @@ export function ConfirmModal() {
               {confirmPrompt.title}
             </div>
             {confirmPrompt.body && (
-              <div className="mt-1 text-sm" style={{ color: 'var(--text-dim)' }}>
+              <div className="mt-1 text-sm break-words" style={{ color: 'var(--text-dim)' }}>
                 {confirmPrompt.body}
               </div>
             )}

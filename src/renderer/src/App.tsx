@@ -14,6 +14,8 @@ import { Settings } from './screens/Settings';
 import { Help } from './screens/Help';
 import { ManageDocker } from './screens/ManageDocker';
 import { CLI } from './screens/CLI';
+import { Activity } from './screens/Activity';
+import { System } from './screens/System';
 
 export default function App() {
   const { route, bootstrap, walletBootstrapped, bootError } = useApp();
@@ -74,12 +76,14 @@ export default function App() {
       {route.name === 'deploy-ssh' && <DeploySsh />}
       {route.name === 'deploy-ssh-batch' && <DeploySshBatch />}
       {route.name === 'progress' && (
-        <Progress jobId={route.jobId} moniker={route.moniker} />
+        <Progress jobId={route.jobId} moniker={route.moniker} origin={route.origin} />
       )}
       {route.name === 'wallet' && <Wallet />}
       {route.name === 'settings' && <Settings />}
       {route.name === 'manage-docker' && <ManageDocker />}
       {route.name === 'cli' && <CLI />}
+      {route.name === 'activity' && <Activity />}
+      {route.name === 'system' && <System />}
       {route.name === 'help' && <Help />}
     </Layout>
   );

@@ -41,6 +41,7 @@ export function Nodes() {
     refreshStatus,
     liveStatuses,
     refreshNodes,
+    reapStuckNodes,
     confirm,
     pushToast,
     dismissToast,
@@ -70,6 +71,24 @@ export function Nodes() {
     () => nodes.filter((n) => n.status === 'online' || n.status === 'loading'),
     [nodes],
   );
+  const stuckCount = useMemo(
+    () => nodes.filter((n) => n.target === 'local' && n.status === 'loading').length,
+    [nodes],
+  );
+
+  const handleReapStuck = async () => {
+    const ok = await confirm({
+      title: stuckCount > 0 ? `Clear ${stuckCount} stuck node${stuckCount === 1 ? '' : 's'}?` : 'Clear stuck nodes?',
+      body:
+        'Drops local nodes that are stuck on "Starting" but whose container is not actually running. ' +
+        'The node entry, on-disk data dir, and any container leftovers are removed. ' +
+        'Use this when a deploy hung mid-flight and the node is wedged in the inventory.',
+      tone: 'warning',
+      confirmLabel: 'Clear stuck',
+    });
+    if (!ok) return;
+    await reapStuckNodes();
+  };
 
   const bulkAction = async (mode: 'start' | 'stop') => {
     const targets = mode === 'start' ? stoppable : running;
@@ -139,11 +158,10 @@ export function Nodes() {
     const ok = await confirm({
       title: `Withdraw rewards from ${claimable.length} node${claimable.length === 1 ? '' : 's'}?`,
       body:
-        `Sends each node's full balance (minus a small gas reserve) to the app wallet. ` +
-        `Total available: ${fmtDVPN(totalClaimable)} DVPN. Each node broadcasts its own ` +
-        `MsgSend signed by its operator key — encrypted backups must be present in app.`,
+        `This sends each node's earnings to your app wallet (a tiny amount is kept on each node to pay network fees). ` +
+        `Total ready to withdraw: ${fmtDVPN(totalClaimable)} P2P. Each node sends its own earnings — they need their saved recovery info, which is already stored safely in this app.`,
       tone: 'info',
-      confirmLabel: `Withdraw ${fmtDVPN(totalClaimable)} DVPN`,
+      confirmLabel: `Withdraw ${fmtDVPN(totalClaimable)} P2P`,
     });
     if (!ok) return;
 
@@ -178,7 +196,7 @@ export function Nodes() {
     dismissToast(progressId);
     if (failures.length === 0) {
       pushToast({
-        title: `Withdrew ~${fmtDVPN(claimedAmount)} DVPN from ${claimed} node${claimed === 1 ? '' : 's'}`,
+        title: `Withdrew about ${fmtDVPN(claimedAmount)} P2P from ${claimed} node${claimed === 1 ? '' : 's'}`,
         tone: 'success',
       });
     } else {
@@ -248,8 +266,8 @@ export function Nodes() {
               disabled={claimable.length === 0 || bulkRunning !== null}
               title={
                 claimable.length === 0
-                  ? 'No node has a withdrawable balance.'
-                  : `Withdraw ~${fmtDVPN(totalClaimable)} DVPN from ${claimable.length} node${claimable.length === 1 ? '' : 's'} to the app wallet.`
+                  ? 'None of your nodes have earnings ready to withdraw yet.'
+                  : `Withdraw about ${fmtDVPN(totalClaimable)} P2P from ${claimable.length} node${claimable.length === 1 ? '' : 's'} to your app wallet.`
               }
             >
               <MIcon
@@ -262,6 +280,18 @@ export function Nodes() {
                   ? `Claim all (${fmtDVPN(totalClaimable)})`
                   : 'Claim all'}
             </button>
+            {stuckCount > 0 ? (
+              <button
+                className="btn btn-secondary"
+                onClick={() => void handleReapStuck()}
+                disabled={bulkRunning !== null}
+                title={`Clear ${stuckCount} node${stuckCount === 1 ? '' : 's'} that got stuck on "Starting" but never finished. This removes them so you can try again.`}
+                style={{ color: 'var(--yellow)' }}
+              >
+                <MIcon name="cleaning_services" size={14} />
+                Clear stuck ({stuckCount})
+              </button>
+            ) : null}
             <button
               className="btn btn-secondary"
               onClick={() => {
@@ -280,19 +310,72 @@ export function Nodes() {
       {nodes.length === 0 ? (
         <div className="card">
           <div className="card-body">
-            <div className="empty-state">
-              <MIcon name="dns" size={32} />
-              <div className="text-lg font-semibold" style={{ color: 'var(--text)' }}>
+            <div
+              className="flex flex-col items-center text-center"
+              style={{ padding: '28px 24px', gap: 10 }}
+            >
+              <div
+                className="rounded-2xl grid place-items-center"
+                style={{
+                  height: 64,
+                  width: 64,
+                  background:
+                    'color-mix(in srgb, var(--accent) 14%, transparent)',
+                  border:
+                    '1px solid color-mix(in srgb, var(--accent) 35%, transparent)',
+                  color: 'var(--accent)',
+                }}
+              >
+                <MIcon name="dns" size={32} />
+              </div>
+              <div
+                className="font-semibold"
+                style={{
+                  color: 'var(--text)',
+                  fontSize: 'clamp(18px, 2vw, 24px)',
+                  lineHeight: 1.2,
+                  letterSpacing: '-0.01em',
+                }}
+              >
                 No nodes deployed yet
               </div>
               <p
-                className="text-sm max-w-md"
-                style={{ color: 'var(--text-muted)' }}
+                className="max-w-lg"
+                style={{
+                  color: 'var(--text-muted)',
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                }}
               >
-                Use <span style={{ color: 'var(--text)' }}>Deploy Local</span> or{' '}
-                <span style={{ color: 'var(--text)' }}>Deploy SSH</span> in the sidebar to deploy
-                your first Sentinel dVPN node.
+                Spin up your first Sentinel dVPN node to start earning $P2P.
+                Run one locally in Docker, or provision a remote VPS over SSH.
               </p>
+              <div className="flex items-center gap-2 flex-wrap justify-center mt-1">
+                <button
+                  className="btn btn-primary"
+                  onClick={() => navigate({ name: 'deploy-local' })}
+                  style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
+                >
+                  <MIcon name="desktop_windows" size={16} />
+                  Deploy local
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => navigate({ name: 'deploy-ssh' })}
+                  style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
+                >
+                  <MIcon name="dns" size={16} />
+                  Deploy SSH
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => navigate({ name: 'deploy-ssh-batch' })}
+                  style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
+                >
+                  <MIcon name="grid_view" size={16} />
+                  Batch deploy
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -357,10 +440,16 @@ export function Nodes() {
                         onClick={() => navigate({ name: 'node-details', id: n.id })}
                         style={{ cursor: 'pointer' }}
                       >
-                        <td style={{ color: 'var(--text)', fontWeight: 500, textAlign: 'left' }}>
-                          <div className="flex items-center gap-2">
+                        <td style={{ color: 'var(--text)', fontWeight: 500, textAlign: 'left', maxWidth: 200 }}>
+                          <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
                             <MIcon name="dns" size={16} />
-                            {n.moniker}
+                            <span
+                              className="truncate"
+                              style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                              title={n.moniker}
+                            >
+                              {n.moniker}
+                            </span>
                           </div>
                         </td>
                         <td style={{ textAlign: 'left' }}>
@@ -386,8 +475,9 @@ export function Nodes() {
                               {n.target === 'local' ? 'Local' : 'SSH'}
                             </span>
                             <span
-                              className="mono-inline text-[11px]"
-                              style={{ color: 'var(--text-dim)' }}
+                              className="mono-inline text-[11px] truncate"
+                              style={{ color: 'var(--text-dim)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                              title={n.target === 'local' ? `:${n.port}` : `${n.host}:${n.port}`}
                             >
                               {n.target === 'local' ? `:${n.port}` : `${n.host}:${n.port}`}
                             </span>
@@ -404,7 +494,7 @@ export function Nodes() {
                         </td>
                         <td
                           className="mono-inline"
-                          style={{ color: 'var(--text-muted)', textAlign: 'right' }}
+                          style={{ color: 'var(--text-muted)', textAlign: 'right', whiteSpace: 'nowrap' }}
                         >
                           {fmtDVPN(n.balanceDVPN)} $P2P
                         </td>

@@ -5,6 +5,7 @@ import { Topbar } from './Topbar';
 import { ToastStack } from './Toast';
 import { ConfirmModal } from './ConfirmModal';
 import { Onboarding } from './Onboarding';
+import { SeedPhraseModal } from './SeedPhraseModal';
 import { MIcon } from './MIcon';
 
 const NO_OUTER_SCROLL = new Set<string>([
@@ -17,6 +18,7 @@ const NO_OUTER_SCROLL = new Set<string>([
   'settings',
   'manage-docker',
   'help',
+  'activity',
 ]);
 
 export function Layout({ children }: PropsWithChildren) {
@@ -38,6 +40,7 @@ export function Layout({ children }: PropsWithChildren) {
       <ToastStack />
       <ConfirmModal />
       <Onboarding />
+      <SeedPhraseModal />
     </div>
   );
 }

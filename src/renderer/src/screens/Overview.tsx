@@ -1,13 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
-import { PageHeader } from '../components/PageHeader';
-import { StatCard } from '../components/StatCard';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
 import { fmtDVPN, relativeTime } from '../lib/format';
-import { KIND_ICON } from '../lib/events';
-import type { NodeStatus } from '../../../shared/types';
-
-const STAT_COL = 'col-span-6 lg:col-span-3';
 
 export function Overview() {
   const {
@@ -22,7 +16,13 @@ export function Overview() {
   } = useApp();
 
   useEffect(() => {
-    for (const n of nodes) void refreshStatus(n.id);
+    for (const n of nodes) {
+      if (!liveStatuses[n.id]) void refreshStatus(n.id);
+    }
+    // Push updates via onLiveStatus keep liveStatuses fresh; we only prime
+    // entries that have never been seen. Intentionally exclude liveStatuses
+    // from deps — its identity changes on every push and would re-trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nodes, refreshStatus]);
 
   const totals = useMemo(() => {
@@ -56,226 +56,262 @@ export function Overview() {
 
   const staleSeconds = Math.floor((now - lastRefreshed) / 1000);
   const stale = staleSeconds > 90;
+  const hasNodes = nodes.length > 0;
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-4">
-      <PageHeader
-        title="Dashboard"
-        subtitle="Real-time status of your decentralized VPN infrastructure."
-        right={
-          <>
-            <span
-              className="text-[11px] mr-1"
-              style={{ color: stale ? 'var(--yellow, #f5b04a)' : 'var(--text-dim)' }}
-              title={new Date(lastRefreshed).toLocaleString()}
-            >
-              {stale ? 'Stale · ' : 'Updated '}
-              {relativeTime(new Date(lastRefreshed).toISOString())}
-            </span>
-            <button className="btn btn-secondary" onClick={refreshAll} title="Refresh">
-              <MIcon name="refresh" size={14} />
-              Refresh
-            </button>
+    <div className="flex flex-col h-full min-h-0 gap-4 overflow-y-auto">
+      {/* Hero */}
+      <div
+        className="relative"
+        style={{
+          background:
+            'radial-gradient(ellipse at top left, color-mix(in srgb, var(--accent) 18%, transparent) 0%, transparent 55%), radial-gradient(ellipse at bottom right, color-mix(in srgb, var(--accent) 10%, transparent) 0%, transparent 60%), var(--bg-input)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius)',
+          padding: 'clamp(20px, 2.6vw, 32px) clamp(18px, 2.4vw, 28px)',
+          containerType: 'inline-size',
+        }}
+      >
+        <div className="flex flex-col items-center text-center gap-2">
+          <h1
+            className="font-semibold"
+            style={{
+              color: 'var(--text)',
+              fontFamily:
+                'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
+              fontSize: 'clamp(18px, 3.4cqi, 32px)',
+              lineHeight: 1.15,
+              letterSpacing: '-0.01em',
+              margin: 0,
+              maxWidth: '100%',
+              textWrap: 'balance',
+            }}
+          >
+            Secure Bandwidth for Anyone, Anywhere in the World
+          </h1>
+          <div
+            className="text-sm"
+            style={{
+              color: 'var(--text-muted)',
+              maxWidth: 580,
+              marginTop: 6,
+              lineHeight: 1.5,
+            }}
+          >
+            Spin up nodes, sell capacity, and earn P2P straight from your machine.
+            <br />
+            Your keys, your hardware, your terms.
+          </div>
+          <div className="flex items-center justify-center gap-3 mt-4 flex-wrap">
             <button
               className="btn btn-primary"
               onClick={() => navigate({ name: 'deploy-local' })}
+              style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
             >
-              <MIcon name="add" size={14} />
-              Deploy a node
+              <MIcon name="rocket_launch" size={16} />
+              {hasNodes ? 'Deploy another node' : 'Deploy your first node'}
             </button>
-          </>
-        }
-      />
+            <button
+              className="btn btn-secondary"
+              onClick={() => navigate({ name: 'wallet' })}
+              style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
+            >
+              <MIcon name="account_balance_wallet" size={16} />
+              Wallet
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={refreshAll}
+              title="Refresh all"
+              style={{ fontSize: 14, padding: '10px 18px', height: 'auto' }}
+            >
+              <MIcon name="refresh" size={16} />
+              Refresh
+            </button>
+          </div>
 
-      <div className="grid grid-cols-12 gap-4">
-        <StatCard
-          className={STAT_COL}
+          <div
+            className="flex items-center justify-center mt-3"
+            style={{ fontSize: 12 }}
+          >
+            <span style={{ color: stale ? 'var(--yellow)' : 'var(--text-dim)' }}>
+              {stale ? 'Stale · ' : 'Updated '}
+              {relativeTime(new Date(lastRefreshed).toISOString())}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* KPI strip */}
+      <div className="grid grid-cols-12 gap-3">
+        <Kpi
+          icon="public"
           label="Connected peers"
           value={totals.peers.toString()}
-          caption={nodes.length === 0 ? 'Deploy a node to start' : ' '}
+          tone="accent"
+          hint={hasNodes ? 'live VPN sessions' : 'deploy to start'}
         />
-        <StatCard
-          className={STAT_COL}
-          label="Number of nodes"
-          value={nodes.length.toString()}
-          caption={nodes.length === 0 ? 'None deployed' : `${totals.reachable} online`}
+        <Kpi
+          icon="dns"
+          label="Nodes online"
+          value={`${totals.reachable}/${nodes.length || 0}`}
+          tone={totals.reachable === nodes.length && hasNodes ? 'green' : 'accent'}
+          hint={hasNodes ? `${nodes.length} total` : 'none deployed'}
         />
-        <StatCard
-          className={STAT_COL}
-          label="Total node balance"
+        <Kpi
+          icon="payments"
+          label="Operator earnings"
           value={`${fmtDVPN(totals.liquidBalance)} $P2P`}
-          caption="Sum across all node operators"
+          tone="green"
+          hint="across all nodes"
         />
-        <StatCard
-          className={STAT_COL}
-          label="Recent events"
+        <Kpi
+          icon="history"
+          label="Activity"
           value={events.length.toString()}
-          caption={events[0] ? relativeTime(events[0].timestamp) : 'no activity yet'}
+          tone="default"
+          hint={events[0] ? relativeTime(events[0].timestamp) : 'no events yet'}
         />
       </div>
 
-      <div className="grid grid-cols-12 gap-4 flex-1 min-h-0">
-        <div className="col-span-12 lg:col-span-8 flex flex-col min-h-0 gap-4">
-          {nodes.length === 0 ? (
-            <div className="card flex-1 min-h-0 overflow-hidden flex flex-col">
-              <div className="card-header">
-                <div className="card-title">My nodes</div>
-              </div>
-              <div className="card-body flex-1">
-                <div className="empty-state">
-                  <MIcon name="dns" size={28} />
-                  <div className="font-semibold" style={{ color: 'var(--text)' }}>
-                    No nodes yet
-                  </div>
-                  <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                    Deploy your first node to start earning rewards.
-                  </div>
-                  <button
-                    className="btn btn-primary mt-2"
-                    onClick={() => navigate({ name: 'deploy-local' })}
-                  >
-                    <MIcon name="rocket_launch" size={14} />
-                    Deploy a node
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-              <button
-                type="button"
-                onClick={() => navigate({ name: 'nodes' })}
-                className="card text-left transition-colors"
-                style={{ cursor: 'pointer' }}
-                title="Open My Nodes"
-              >
-                <div className="card-body flex items-center gap-3 py-3">
-                  <div
-                    className="h-9 w-9 rounded-md grid place-items-center flex-shrink-0"
-                    style={{
-                      background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
-                      color: 'var(--accent)',
-                    }}
-                  >
-                    <MIcon name="dns" size={18} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-                      Added nodes ({nodes.length})
-                    </div>
-                    <div className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
-                      {totals.reachable} online · view all in My Nodes
-                    </div>
-                  </div>
-                  <span
-                    className="text-[11px] flex items-center gap-1"
-                    style={{ color: 'var(--accent)' }}
-                  >
-                    View here
-                    <MIcon name="arrow_forward" size={14} />
-                  </span>
-                </div>
-              </button>
-          )}
-        </div>
+      {/* Quick actions */}
+      <div className="grid grid-cols-12 gap-3">
+        <ActionTile
+          title="Deploy locally"
+          desc="Run a node in Docker on this machine."
+          icon="desktop_windows"
+          onClick={() => navigate({ name: 'deploy-local' })}
+        />
+        <ActionTile
+          title="Deploy over SSH"
+          desc="Provision a remote VPS as a node."
+          icon="dns"
+          onClick={() => navigate({ name: 'deploy-ssh' })}
+        />
+        <ActionTile
+          title="Batch deploy"
+          desc="Roll out many SSH targets in one pass."
+          icon="grid_view"
+          onClick={() => navigate({ name: 'deploy-ssh-batch' })}
+        />
+        <ActionTile
+          title="Automate via CLI"
+          desc="Headless control of every action."
+          icon="terminal"
+          onClick={() => navigate({ name: 'cli' })}
+        />
+      </div>
 
-        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0">
-          <div className="card flex flex-col min-h-0 overflow-hidden flex-1">
-            <div className="card-header">
-              <div className="card-title">Recent activity</div>
-            </div>
-            <div className="card-body flex-1 min-h-0 overflow-auto">
-              {events.length === 0 ? (
-                <div
-                  className="text-xs text-center py-6"
-                  style={{ color: 'var(--text-dim)' }}
-                >
-                  No activity yet.
-                </div>
-              ) : (
-                <ul className="flex flex-col gap-3">
-                  {events.slice(0, 20).map((e) => {
-                    const Icon = KIND_ICON[e.kind];
-                    return (
-                      <li key={e.id} className="flex items-start gap-3">
-                        <div
-                          className="h-7 w-7 rounded-md grid place-items-center flex-shrink-0"
-                          style={{
-                            background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
-                            color: 'var(--accent)',
-                          }}
-                        >
-                          <Icon size={14} weight="regular" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="text-xs font-medium"
-                            style={{ color: 'var(--text)' }}
-                          >
-                            {e.title}
-                          </div>
-                          {e.subtitle && (
-                            <div
-                              className="text-[11px] truncate"
-                              style={{ color: 'var(--text-muted)' }}
-                            >
-                              {e.subtitle}
-                            </div>
-                          )}
-                        </div>
-                        <div
-                          className="text-[10px] whitespace-nowrap"
-                          style={{ color: 'var(--text-dim)' }}
-                        >
-                          {relativeTime(e.timestamp)}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-          </div>
+    </div>
+  );
+}
+
+interface KpiProps {
+  icon: string;
+  label: string;
+  value: string;
+  hint: string;
+  tone: 'default' | 'accent' | 'green';
+}
+
+function Kpi({ icon, label, value, hint, tone }: KpiProps) {
+  const tint =
+    tone === 'green'
+      ? 'var(--green)'
+      : tone === 'accent'
+        ? 'var(--accent)'
+        : 'var(--text-muted)';
+  return (
+    <div
+      className="col-span-6 lg:col-span-3 flex flex-col items-center text-center"
+      style={{
+        background: 'var(--bg-input)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        padding: '14px 16px',
+        gap: 6,
+      }}
+    >
+      <div
+        className="h-9 w-9 rounded-md grid place-items-center flex-shrink-0"
+        style={{
+          background: `color-mix(in srgb, ${tint} 15%, transparent)`,
+          color: tint,
+        }}
+      >
+        <MIcon name={icon} size={18} />
+      </div>
+      <div className="w-full min-w-0">
+        <div
+          className="text-[10px] uppercase tracking-wider"
+          style={{ color: 'var(--text-dim)' }}
+        >
+          {label}
+        </div>
+        <div
+          className="text-lg font-semibold leading-tight truncate"
+          style={{ color: 'var(--text)' }}
+          title={value}
+        >
+          {value}
+        </div>
+        <div
+          className="text-[11px] truncate"
+          style={{ color: 'var(--text-muted)' }}
+        >
+          {hint}
         </div>
       </div>
     </div>
   );
 }
 
-function StatusChip({ status, reachable }: { status: NodeStatus; reachable?: boolean }) {
-  if (status === 'loading')
-    return (
-      <span className="chip chip-warn">
-        <span
-          className="h-1.5 w-1.5 rounded-full"
-          style={{ background: 'var(--yellow)' }}
-        />
-        Starting
-      </span>
-    );
-  if (status === 'error')
-    return (
-      <span className="chip chip-danger">
-        <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--red)' }} />
-        Error
-      </span>
-    );
-  if (status === 'offline')
-    return (
-      <span className="chip chip-danger">
-        <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--red)' }} />
-        Offline
-      </span>
-    );
-  return reachable ? (
-    <span className="chip chip-success">
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--green)' }} />
-      Online
-    </span>
-  ) : (
-    <span className="chip chip-warn">
-      <span className="h-1.5 w-1.5 rounded-full" style={{ background: 'var(--yellow)' }} />
-      Syncing
-    </span>
+interface ActionTileProps {
+  title: string;
+  desc: string;
+  icon: string;
+  onClick: () => void;
+}
+
+function ActionTile({ title, desc, icon, onClick }: ActionTileProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="col-span-12 sm:col-span-6 lg:col-span-3 transition-colors group flex flex-col items-center text-center"
+      style={{
+        background: 'var(--bg-input)',
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius)',
+        padding: '12px 16px',
+        cursor: 'pointer',
+        gap: 6,
+      }}
+    >
+      <div
+        className="rounded-md grid place-items-center"
+        style={{
+          height: 40,
+          width: 40,
+          background: 'color-mix(in srgb, var(--accent) 15%, transparent)',
+          color: 'var(--accent)',
+        }}
+      >
+        <MIcon name={icon} size={22} />
+      </div>
+      <div
+        className="text-sm font-semibold"
+        style={{ color: 'var(--text)' }}
+      >
+        {title}
+      </div>
+      <div
+        className="text-[11px] leading-snug"
+        style={{ color: 'var(--text-muted)' }}
+      >
+        {desc}
+      </div>
+    </button>
   );
 }
 

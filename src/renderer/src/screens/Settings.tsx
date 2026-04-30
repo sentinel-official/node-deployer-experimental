@@ -149,7 +149,7 @@ export function Settings() {
                           background: h.reachable ? 'var(--green)' : 'var(--red)',
                         }}
                       />
-                      <span className="mono-inline truncate" style={{ color: 'var(--text)' }}>
+                      <span className="mono-inline truncate min-w-0" style={{ color: 'var(--text)' }}>
                         {h.rpcUrl}
                       </span>
                       <div className="flex-1" />
@@ -174,6 +174,43 @@ export function Settings() {
                   ))}
                 </ul>
               )}
+            </div>
+
+            <div className="flex flex-col">
+              <div
+                className="text-[11px] uppercase tracking-wider font-semibold mb-2"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                Refresh cadence
+              </div>
+              <p
+                className="text-[11px] mb-3"
+                style={{ color: 'var(--text-muted)' }}
+              >
+                How often the app re-queries the chain in the background. Lower
+                values keep the UI fresher but issue more RPC calls — pick longer
+                intervals on metered or rate-limited endpoints.
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <RefreshIntervalField
+                  label="Wallet balance"
+                  hint="Re-queries the operator wallet's $P2P balance. 10–600 seconds."
+                  min={10}
+                  max={600}
+                  step={5}
+                  value={draft.walletRefreshIntervalSec}
+                  onChange={(v) => update({ walletRefreshIntervalSec: v })}
+                />
+                <RefreshIntervalField
+                  label="Node status"
+                  hint="Samples each deployed node (sessions, earnings, reachability). 15–600 seconds."
+                  min={15}
+                  max={600}
+                  step={5}
+                  value={draft.nodeRefreshIntervalSec}
+                  onChange={(v) => update({ nodeRefreshIntervalSec: v })}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -262,6 +299,52 @@ export function Settings() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function RefreshIntervalField({
+  label,
+  hint,
+  min,
+  max,
+  step,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+  step: number;
+  value: number;
+  onChange: (next: number) => void;
+}) {
+  const clamp = (n: number) => Math.max(min, Math.min(max, Math.round(n)));
+  return (
+    <div>
+      <div className="field-label">{label}</div>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={Number.isFinite(value) ? value : min}
+          onChange={(e) => {
+            const raw = Number(e.target.value);
+            if (Number.isFinite(raw)) onChange(clamp(raw));
+          }}
+          className="field-input mono-inline"
+          style={{ width: 110 }}
+        />
+        <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+          seconds
+        </span>
+      </div>
+      <div className="text-[10px] mt-1" style={{ color: 'var(--text-dim)' }}>
+        {hint}
       </div>
     </div>
   );

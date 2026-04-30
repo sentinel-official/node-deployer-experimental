@@ -12,8 +12,14 @@ import {
   runNode,
   setRestartPolicy,
   stopContainer,
+  withDockerTimeout,
 } from './docker';
-import { readClients, signClient } from './sentinel-client';
+import {
+  readClients,
+  signClient,
+  withRpcTimeout,
+  RPC_QUERY_TIMEOUT_MS,
+} from './sentinel-client';
 import { readStore, writeStore } from './store';
 import { addEvent } from './events';
 import { recordSample, purgeNode, history } from './metrics';
@@ -27,6 +33,14 @@ import { resolveCountry } from './geoip';
 import { fromBech32, toBech32 } from '@cosmjs/encoding';
 import { BaseSession } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/session/v3/session';
 import { Status } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/types/v1/status';
+import type { Plan } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/plan/v3/plan';
+import type { Node as SentinelNode } from '@sentinel-official/sentinel-js-sdk/dist/protobuf/sentinel/node/v3/node';
+import type { SentinelQueryClient } from '@sentinel-official/sentinel-js-sdk';
+
+// Node ids are UUIDv4 generated locally. We validate against this regex
+// before interpolating an id into any shell command, even when the id
+// also flows through shellQuote — defence in depth.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Sentinel stores the *node* identity under a distinct bech32 HRP
@@ -91,6 +105,66 @@ function summarizeSession(raw: unknown): NodeSession | null {
 }
 
 /**
+ * Discover every plan (across all providers) the given node address is
+ * currently linked into. The chain has no inverse "plans for node" query,
+ * so we list active plans, then probe each one's `nodesForPlan` to test
+ * membership. Bounded by the size of the active-plan set on Sentinel
+ * (well under a hundred today).
+ *
+ * The price field on Plan is `prices[0]` — Sentinel v3 plan pricing is
+ * immutable once created. We surface `quoteValue` as the on-chain micro
+ * amount and divide by 1e6 for display.
+ */
+async function discoverPlansForNode(
+  sentinel: SentinelQueryClient,
+  nodeAddr: string,
+): Promise<NodePlanLink[]> {
+  let plans: Plan[] = [];
+  try {
+    const res = await sentinel.plan.plans(Status.STATUS_ACTIVE);
+    plans = res.plans ?? [];
+  } catch (err) {
+    log.debug('plans query failed', { err: (err as Error).message });
+    return [];
+  }
+
+  const out: NodePlanLink[] = [];
+  await Promise.all(
+    plans.map(async (plan) => {
+      try {
+        const r = await sentinel.node.nodesForPlan(plan.id, Status.STATUS_ACTIVE);
+        const nodes = (r.nodes ?? []) as SentinelNode[];
+        const isMember = nodes.some((n) => n.address === nodeAddr);
+        if (!isMember) return;
+        const price = plan.prices?.[0];
+        const durationSec = plan.duration
+          ? Number(plan.duration.seconds?.toString?.() ?? plan.duration.seconds ?? 0)
+          : 0;
+        out.push({
+          id: plan.id.toString(),
+          denom: price?.denom ?? '',
+          price: price ? Number(price.quoteValue || '0') / 1_000_000 : 0,
+          durationDays: Math.round((durationSec / 86_400) * 100) / 100,
+        });
+      } catch (err) {
+        log.debug('nodesForPlan probe failed', {
+          planId: plan.id?.toString?.(),
+          err: (err as Error).message,
+        });
+      }
+    }),
+  );
+  // Stable ordering by plan id (numeric).
+  out.sort((a, b) => {
+    const an = Number(a.id);
+    const bn = Number(b.id);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+    return a.id.localeCompare(b.id);
+  });
+  return out;
+}
+
+/**
  * Accepts either a raw `{ typeUrl, value: Uint8Array }` Any from the
  * query client, or an already-decoded BaseSession (defensive — some SDK
  * versions auto-decode). Returns undefined when the shape is unknown or
@@ -119,14 +193,16 @@ function decodeBaseSession(raw: unknown): BaseSession | undefined {
     return undefined;
   }
 }
-import type {
-  DeployedNode,
-  MetricsSample,
-  MetricsWindow,
-  NodeLiveStatus,
-  NodeSession,
-  NodeStatus,
-  SSHCredentials,
+import {
+  IPC,
+  type DeployedNode,
+  type MetricsSample,
+  type MetricsWindow,
+  type NodeLiveStatus,
+  type NodePlanLink,
+  type NodeSession,
+  type NodeStatus,
+  type SSHCredentials,
 } from '../../shared/types';
 import { log } from './logger';
 
@@ -163,6 +239,135 @@ export async function listNodes(): Promise<DeployedNode[]> {
   return store.nodes;
 }
 
+// A node sitting in `loading` is a zombie when:
+//   • it has no runtimeId AND was created >10 min ago — deploy crashed
+//     before any container ran; OR
+//   • it has a runtimeId but the container is missing/exited AND was created
+//     >10 min ago — container died and never recovered.
+// In either case the fast-poller hammers the chain forever and the Nodes
+// screen shows a permanent "Starting" entry. Drop them.
+const ZOMBIE_LOADING_AGE_MS = 10 * 60_000;
+
+/**
+ * User-triggered force-clear: drop every local `loading` node whose container
+ * is not running, regardless of age. This is the "I clicked Clear Stuck Nodes"
+ * path from the UI — no 10-minute grace period.
+ */
+export async function reapStuckNow(): Promise<number> {
+  const store = await readStore();
+  const before = store.nodes.length;
+  const survivors: DeployedNode[] = [];
+  let dropped = 0;
+  for (const n of store.nodes) {
+    if (n.target !== 'local' || n.status !== 'loading') {
+      survivors.push(n);
+      continue;
+    }
+    let isStuck = true;
+    if (n.runtimeId) {
+      const up = await withDockerTimeout(
+        () => isRunning(n.runtimeId!),
+        5_000,
+        'isRunning',
+      ).catch(() => false);
+      isStuck = !up;
+    }
+    if (!isStuck) {
+      survivors.push(n);
+      continue;
+    }
+    dropped += 1;
+    log.info('force-reap stuck node', { id: n.id, moniker: n.moniker });
+    if (n.runtimeId) {
+      try {
+        await removeContainer(n.runtimeId);
+      } catch {
+        /* already gone */
+      }
+    }
+    try {
+      await fs.rm(nodeDataDir(n.id), { recursive: true, force: true });
+    } catch (err) {
+      log.warn('stuck data dir cleanup failed', {
+        path: nodeDataDir(n.id),
+        err: (err as Error).message,
+      });
+    }
+    stopFastPoll(n.id);
+  }
+  if (dropped > 0) {
+    store.nodes = survivors;
+    await writeStore(store);
+    broadcast(IPC.NODES_CHANGED, null);
+    log.info('force reap complete', { before, after: survivors.length, dropped });
+  }
+  return dropped;
+}
+
+export async function reapZombieNodes(): Promise<number> {
+  const store = await readStore();
+  const now = Date.now();
+  const before = store.nodes.length;
+  const survivors: DeployedNode[] = [];
+  let dropped = 0;
+  for (const n of store.nodes) {
+    const age = n.createdAt ? now - Date.parse(n.createdAt) : 0;
+    if (n.target !== 'local' || n.status !== 'loading' || age <= ZOMBIE_LOADING_AGE_MS) {
+      survivors.push(n);
+      continue;
+    }
+    let isZombie = false;
+    let reason = '';
+    if (!n.runtimeId) {
+      isZombie = true;
+      reason = 'no runtimeId';
+    } else {
+      const up = await withDockerTimeout(
+        () => isRunning(n.runtimeId!),
+        5_000,
+        'isRunning',
+      ).catch(() => false);
+      if (!up) {
+        isZombie = true;
+        reason = 'container not running';
+      }
+    }
+    if (isZombie) {
+      dropped += 1;
+      log.info('reaping zombie node', {
+        id: n.id,
+        moniker: n.moniker,
+        ageMs: age,
+        reason,
+      });
+      if (n.runtimeId) {
+        try {
+          await removeContainer(n.runtimeId);
+        } catch {
+          /* container already gone — fine */
+        }
+      }
+      try {
+        await fs.rm(nodeDataDir(n.id), { recursive: true, force: true });
+      } catch (err) {
+        log.warn('zombie data dir cleanup failed', {
+          path: nodeDataDir(n.id),
+          err: (err as Error).message,
+        });
+      }
+      continue;
+    }
+    survivors.push(n);
+  }
+  if (dropped > 0) {
+    store.nodes = survivors;
+    await writeStore(store);
+    broadcast(IPC.NODES_CHANGED, null);
+    log.info('zombie reap complete', { before, after: survivors.length, dropped });
+  }
+  return dropped;
+}
+
 export async function getNode(id: string): Promise<DeployedNode | null> {
   const store = await readStore();
   return store.nodes.find((n) => n.id === id) ?? null;
@@ -185,7 +390,7 @@ export async function ensureNodePersisted(node: DeployedNode): Promise<void> {
     store.nodes[idx] = { ...store.nodes[idx], ...node };
   }
   await writeStore(store);
-  broadcast('nodes:changed', null);
+  broadcast(IPC.NODES_CHANGED, null);
 }
 
 export async function updateNode(id: string, patch: Partial<DeployedNode>): Promise<void> {
@@ -194,11 +399,119 @@ export async function updateNode(id: string, patch: Partial<DeployedNode>): Prom
   if (!n) return;
   Object.assign(n, patch);
   await writeStore(store);
-  broadcast('nodes:changed', null);
+  broadcast(IPC.NODES_CHANGED, null);
 }
 
 export async function transition(id: string, status: NodeStatus): Promise<void> {
   await updateNode(id, { status });
+  // The on-chain registration normally lands within a few seconds of the
+  // deploy tx, but the global poller only samples every 60s. While a node
+  // sits in `loading` we run a per-node fast-poller that probes every few
+  // seconds so the UI flips "Pending registration" → "Active" promptly.
+  // For loading→online we keep the fast-poller running so peers/uptime/
+  // reachability stay live during the post-online grace window — the
+  // poller's own tick checks `startedAt + grace` and self-stops.
+  if (status === 'loading' || status === 'online') startFastPoll(id);
+  else stopFastPoll(id);
+}
+
+// ---------------------------------------------------------------------------
+// Per-node fast-poller: live updates for nodes still registering on chain
+// ---------------------------------------------------------------------------
+
+const fastPollers = new Map<string, NodeJS.Timeout>();
+const fastPollExpiry = new Map<string, number>();
+const FAST_POLL_INTERVAL_MS = 4_000;
+const FAST_POLL_TIMEOUT_MS = 5 * 60_000;
+// After a node flips loading → online the renderer still needs frequent
+// pushes for the first minute so peer count, uptime, and reachability
+// don't sit on stale data until the 60s background poll catches up.
+const POST_ONLINE_GRACE_MS = 60_000;
+
+function startFastPoll(id: string): void {
+  if (fastPollers.has(id)) {
+    fastPollExpiry.set(id, Date.now() + FAST_POLL_TIMEOUT_MS);
+    return;
+  }
+  fastPollExpiry.set(id, Date.now() + FAST_POLL_TIMEOUT_MS);
+  const tick = async () => {
+    if ((fastPollExpiry.get(id) ?? 0) < Date.now()) {
+      stopFastPoll(id);
+      return;
+    }
+    try {
+      const node = await getNode(id);
+      if (!node) {
+        stopFastPoll(id);
+        return;
+      }
+      // Keep ticking through the post-online grace window. We compare against
+      // the node's `startedAt` so the grace covers the first ~60s of life,
+      // independent of when the loading→online transition actually fired.
+      const startedAtMs = node.startedAt ? Date.parse(node.startedAt) : 0;
+      const inOnlineGrace =
+        node.status === 'online' &&
+        startedAtMs > 0 &&
+        Date.now() - startedAtMs < POST_ONLINE_GRACE_MS;
+      if (node.status !== 'loading' && !inOnlineGrace) {
+        stopFastPoll(id);
+        return;
+      }
+      const status = await liveStatus(id);
+      // Push the fresh snapshot to the renderer so chainStatus flips live.
+      broadcast(IPC.NODES_LIVE_STATUS, { nodeId: id, status });
+      // Promote loading → online the same way the 60s poller does, but
+      // sooner. The poller's symmetric offline→? rule still owns the
+      // reverse direction (we only act while node.status === 'loading').
+      if (status.reachable) {
+        await transition(id, 'online');
+        await addEvent({
+          kind: 'node-online',
+          title: `Node ${node.moniker} is online`,
+          subtitle: 'Registered on chain',
+          relatedNodeId: id,
+        });
+        // transition() will call stopFastPoll for us via the `else` branch.
+      } else if (
+        // Container-up fallback during fast-poll. Same rule as the 60s
+        // poller: if the container has been running >60s and chain hasn't
+        // caught up, still flip the UI to online.
+        node.target === 'local' &&
+        node.runtimeId &&
+        node.startedAt &&
+        Date.now() - Date.parse(node.startedAt) > 60_000 &&
+        (await withDockerTimeout(
+          () => isRunning(node.runtimeId!),
+          5_000,
+          'isRunning',
+        ).catch(() => false))
+      ) {
+        await transition(id, 'online');
+        await addEvent({
+          kind: 'node-online',
+          title: `Node ${node.moniker} is online`,
+          subtitle: 'Container running (chain registration pending)',
+          relatedNodeId: id,
+        });
+      }
+    } catch (err) {
+      log.debug('fast-poll node failed', { id, err: (err as Error).message });
+    }
+  };
+  // Kick a probe immediately, then on the interval. immediate probe makes the
+  // first refresh visible within the IPC round-trip rather than after 4 s.
+  void tick();
+  const handle = setInterval(() => void tick(), FAST_POLL_INTERVAL_MS);
+  fastPollers.set(id, handle);
+}
+
+function stopFastPoll(id: string): void {
+  const h = fastPollers.get(id);
+  if (h) {
+    clearInterval(h);
+    fastPollers.delete(id);
+  }
+  fastPollExpiry.delete(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -211,14 +524,73 @@ async function remoteSudo(client: import('ssh2').Client): Promise<string> {
   return r.stdout.trim() === '0' ? '' : 'sudo -n ';
 }
 
+/**
+ * Verify a freshly-started local container is still alive ~6s later. Without
+ * this guard `runNode` happily returns success on a container that exits one
+ * second later (port conflict, bad config), and the user stares at an
+ * "online" pill that flips to offline on the next 60s poll. We surface the
+ * tail of the container logs so the failure mode is debuggable from the UI.
+ */
+async function probeContainerAfterStart(runtimeId: string, name: string): Promise<void> {
+  const startedAt = Date.now();
+  const deadline = startedAt + 6_000;
+  // Poll every ~500 ms until we either see a confirmed-up window (≥4 s of
+  // continuous "running" state) or hit the deadline. Each docker call gets
+  // its own per-call timeout so a wedged daemon can't block the loop.
+  let firstSeenRunningAt: number | null = null;
+  while (Date.now() < deadline) {
+    const up = await withDockerTimeout(() => isRunning(runtimeId), 4_000, 'isRunning').catch(
+      () => false,
+    );
+    if (up) {
+      firstSeenRunningAt ??= Date.now();
+      if (Date.now() - (firstSeenRunningAt ?? Date.now()) >= 1_500) return;
+    } else if (firstSeenRunningAt !== null) {
+      const tail = await withDockerTimeout(
+        () => containerLogs(runtimeId, 30),
+        6_000,
+        'containerLogs',
+      ).catch(() => [] as string[]);
+      throw new Error(
+        `Your node "${name}" started, but stopped almost immediately. Here is what it printed before it stopped:\n` +
+          tail.join('\n').slice(-2000),
+      );
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const finalUp = await withDockerTimeout(
+    () => isRunning(runtimeId),
+    4_000,
+    'isRunning',
+  ).catch(() => false);
+  if (!finalUp) {
+    const tail = await withDockerTimeout(
+      () => containerLogs(runtimeId, 30),
+      6_000,
+      'containerLogs',
+    ).catch(() => [] as string[]);
+    throw new Error(
+      `Your node "${name}" would not stay running. Here is what it printed:\n` +
+        tail.join('\n').slice(-2000),
+    );
+  }
+}
+
 export async function startNode(id: string): Promise<void> {
   const node = await getNode(id);
-  if (!node) throw new Error('Node not found');
+  if (!node) throw new Error('We couldn\'t find that node — it may have already been removed.');
 
   if (node.target === 'local') {
     const name = containerName(node.id);
     try {
-      if (node.runtimeId && (await isRunning(node.runtimeId))) {
+      if (
+        node.runtimeId &&
+        (await withDockerTimeout(
+          () => isRunning(node.runtimeId!),
+          5_000,
+          'isRunning',
+        ).catch(() => false))
+      ) {
         await setRestartPolicy(node.runtimeId, 'unless-stopped');
         await updateNode(id, { status: 'online' });
         return;
@@ -252,6 +624,11 @@ export async function startNode(id: string): Promise<void> {
       port: node.port,
       imageTag: IMAGE_TAG,
     });
+    // Liveness probe — give the container ~6s to either crash or stay up.
+    // Without this, `runNode` can return success on a container that exits
+    // 1s later (port conflict, config drift), leaving the user staring at
+    // an "online" pill that flips to offline on the next poll.
+    await probeContainerAfterStart(runtimeId, name);
     const now = Date.now();
     startedAt.set(id, now);
     await updateNode(id, { status: 'online', runtimeId, startedAt: new Date(now).toISOString() });
@@ -260,14 +637,17 @@ export async function startNode(id: string): Promise<void> {
     const creds = sshKeyring.get(id);
     if (!creds) {
       throw new Error(
-        'SSH credentials for this remote node are no longer cached. Re-enter them from Node Details to restart it.',
+        'We no longer have the SSH login for this remote node saved. Open Node Details and enter your SSH details again to restart it.',
       );
     }
     await withSSH(creds, async (client) => {
       const sudo = await remoteSudo(client);
       const cmd = sudo + shellQuote(['docker', 'start', containerName(id)]);
-      const { code, stderr } = await runRemote(client, cmd);
-      if (code !== 0) throw new Error(`docker start failed: ${stderr.trim().slice(-400)}`);
+      const { code, stderr } = await runRemote(client, cmd, undefined, { timeoutMs: 30_000 });
+      if (code === 124) {
+        throw new Error('The remote computer didn\'t respond within 30 seconds. Please check your SSH connection and that Docker is running on the remote computer.');
+      }
+      if (code !== 0) throw new Error(`Could not start the node on the remote computer. Details: ${stderr.trim().slice(-400)}`);
     });
     const now = Date.now();
     startedAt.set(id, now);
@@ -317,14 +697,14 @@ export async function restartNode(id: string): Promise<void> {
     await updateNode(id, { status: 'online', startedAt: new Date(now).toISOString() });
   } else {
     const creds = sshKeyring.get(id);
-    if (!creds) throw new Error('Re-enter SSH credentials to restart this remote node.');
+    if (!creds) throw new Error('Please enter your SSH details again to restart this remote node.');
     await withSSH(creds, async (client) => {
       const sudo = await remoteSudo(client);
       const { code, stderr } = await runRemote(
         client,
         sudo + shellQuote(['docker', 'restart', containerName(id)]),
       );
-      if (code !== 0) throw new Error(`docker restart failed: ${stderr.trim().slice(-400)}`);
+      if (code !== 0) throw new Error(`Could not restart the node on the remote computer. Details: ${stderr.trim().slice(-400)}`);
     });
     const now = Date.now();
     startedAt.set(id, now);
@@ -365,10 +745,19 @@ export async function removeNode(id: string): Promise<void> {
       try {
         await withSSH(creds, async (client) => {
           const sudo = await remoteSudo(client);
+          // Defence in depth: validate the id at the IPC boundary AND
+          // shell-quote it here. A non-UUID id would otherwise let
+          // user-controlled input break out of the rm path.
+          if (!UUID_RE.test(id)) {
+            throw new Error('refusing remote teardown for non-UUID node id');
+          }
+          const safeId = shellQuote([id]);
+          // We keep `$HOME` literal so the remote shell expands it,
+          // but the id itself is a quoted token now.
           await runRemote(
             client,
             sudo + shellQuote(['docker', 'rm', '-f', containerName(id)]) +
-              ` ; rm -rf $HOME/.sentinel-dvpnx/${id} /root/.sentinel-dvpnx/${id} 2>/dev/null || true`,
+              ` ; rm -rf "$HOME/.sentinel-dvpnx/"${safeId} "/root/.sentinel-dvpnx/"${safeId} 2>/dev/null || true`,
           );
         });
       } catch (err) {
@@ -386,7 +775,7 @@ export async function removeNode(id: string): Promise<void> {
   delete store.logs[id];
   delete store.nodeBackups[id];
   await writeStore(store);
-  broadcast('nodes:changed', null);
+  broadcast(IPC.NODES_CHANGED, null);
 
   await addEvent({
     kind: 'node-removed',
@@ -440,6 +829,7 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       uptimeMs: 0,
       logTail: [],
       activeSubscriptions: [],
+      linkedPlans: [],
       error: 'Unknown node',
     };
   }
@@ -453,12 +843,22 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
     try {
       const nodeAddr = accountToNodeAddr(node.operatorAddress);
       const onChain = sentinel
-        ? await sentinel.node.node(nodeAddr).catch(() => undefined)
+        ? await withRpcTimeout(
+            () => sentinel.node.node(nodeAddr),
+            RPC_QUERY_TIMEOUT_MS,
+            'node.node',
+          ).catch(() => undefined)
         : undefined;
-      const balanceCoin = await stargate
-        .getBalance(node.operatorAddress, DENOM)
-        .catch(() => ({ amount: '0' }));
-      const chainHeight = await stargate.getHeight().catch(() => undefined);
+      const balanceCoin = await withRpcTimeout(
+        () => stargate.getBalance(node.operatorAddress, DENOM),
+        RPC_QUERY_TIMEOUT_MS,
+        'getBalance',
+      ).catch(() => ({ amount: '0' }));
+      const chainHeight = await withRpcTimeout(
+        () => stargate.getHeight(),
+        RPC_QUERY_TIMEOUT_MS,
+        'getHeight',
+      ).catch(() => undefined);
 
       // "reachable" means the node is actually serving traffic: it is both
       // registered on-chain AND its local container is running. Without the
@@ -467,7 +867,11 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       // flip the UI back to "online" after an explicit stop.
       let containerUp = true;
       if (node.target === 'local') {
-        containerUp = node.runtimeId ? await isRunning(node.runtimeId).catch(() => false) : false;
+        containerUp = node.runtimeId
+          ? await withDockerTimeout(() => isRunning(node.runtimeId!), 5_000, 'isRunning').catch(
+              () => false,
+            )
+          : false;
       }
       const reachable = Boolean(onChain) && containerUp;
       const earnings = udvpnToDvpn(balanceCoin.amount);
@@ -480,7 +884,11 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       const activeSubscriptions: NodeSession[] = [];
       if (sentinel && reachable) {
         try {
-          const res = await sentinel.session.sessionsForNode(nodeAddr);
+          const res = await withRpcTimeout(
+            () => sentinel.session.sessionsForNode(nodeAddr),
+            RPC_QUERY_TIMEOUT_MS,
+            'sessionsForNode',
+          );
           // Only count sessions we could actually decode AND that are
           // marked STATUS_ACTIVE. The raw list includes winding-down and
           // already-ended sessions, which aren't "live subscribers".
@@ -497,6 +905,17 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
           log.debug('sessions query failed', { err: (err as Error).message });
         }
       }
+
+      // Plans this node is linked into. We probe even when `reachable` is
+      // false — a node can be linked into plans before it registers and the
+      // operator wants to see that linkage in the UI to debug it.
+      const linkedPlans = sentinel
+        ? await withRpcTimeout(
+            () => discoverPlansForNode(sentinel, nodeAddr),
+            RPC_QUERY_TIMEOUT_MS,
+            'discoverPlansForNode',
+          ).catch(() => [] as NodePlanLink[])
+        : [];
 
       // Chain status (active / active_pending / inactive).
       const chainStatusStr = onChain && onChain.status !== undefined ? String(onChain.status) : undefined;
@@ -539,6 +958,7 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
         chainAddress: nodeAddr,
         lastStatusAt,
         activeSubscriptions,
+        linkedPlans,
       };
     } finally {
       disconnect();
@@ -553,6 +973,7 @@ export async function liveStatus(id: string): Promise<NodeLiveStatus> {
       uptimeMs,
       logTail: logTail.slice(-100),
       activeSubscriptions: [],
+      linkedPlans: [],
       error: (err as Error).message,
     };
   }
@@ -569,17 +990,24 @@ export function historyFor(id: string, window: MetricsWindow): MetricsSample[] {
 export function startPoller(): void {
   if (poller) return;
   // Rehydrate startedAt from persisted DeployedNode records so uptime
-  // survives app restarts.
-  void listNodes().then((nodes) => {
-    for (const n of nodes) {
-      if (n.startedAt) startedAt.set(n.id, Date.parse(n.startedAt));
-    }
-  });
+  // survives app restarts. Also re-arm the fast-poller for any node that
+  // was already mid-registration when the app last quit. Reap zombies first
+  // so we don't spin up fast-pollers for nodes that will never come up.
+  void reapZombieNodes()
+    .catch((err) => log.warn('reap zombies failed', { err: (err as Error).message }))
+    .then(listNodes)
+    .then((nodes) => {
+      for (const n of nodes) {
+        if (n.startedAt) startedAt.set(n.id, Date.parse(n.startedAt));
+        if (n.status === 'loading') startFastPoll(n.id);
+      }
+    });
   const tick = async () => {
     const nodes = await listNodes();
     for (const node of nodes) {
       try {
         const status = await liveStatus(node.id);
+        broadcast(IPC.NODES_LIVE_STATUS, { nodeId: node.id, status });
         recordSample({
           nodeId: node.id,
           ts: Date.now(),
@@ -609,6 +1037,30 @@ export function startPoller(): void {
             subtitle: 'Registered on chain',
             relatedNodeId: node.id,
           });
+        } else if (
+          // Container-up fallback: if a local node has had its container
+          // running for >60s but on-chain registration hasn't landed yet
+          // (RPC pool slow, indexer lag, chain mempool congested), we still
+          // promote to `online` so the UI doesn't sit in "Starting" forever.
+          // The next tick will flip it back to offline if the container drops.
+          node.target === 'local' &&
+          node.status === 'loading' &&
+          node.runtimeId &&
+          node.startedAt &&
+          Date.now() - Date.parse(node.startedAt) > 60_000 &&
+          (await withDockerTimeout(
+            () => isRunning(node.runtimeId!),
+            5_000,
+            'isRunning',
+          ).catch(() => false))
+        ) {
+          await transition(node.id, 'online');
+          await addEvent({
+            kind: 'node-online',
+            title: `Node ${node.moniker} is online`,
+            subtitle: 'Container running (chain registration pending)',
+            relatedNodeId: node.id,
+          });
         } else if (!status.reachable && node.status === 'online') {
           await transition(node.id, 'offline');
           await addEvent({
@@ -626,7 +1078,33 @@ export function startPoller(): void {
   // Fire once shortly after startup so history charts have at least one point
   // by the time the user opens them.
   setTimeout(() => void tick(), 5_000);
-  poller = setInterval(() => void tick(), 60_000);
+  pollerTick = tick;
+  void getSettings()
+    .then((s) => armPoller(s.nodeRefreshIntervalSec))
+    .catch(() => armPoller(60));
+}
+
+let pollerTick: (() => Promise<void>) | null = null;
+
+function armPoller(intervalSec: number): void {
+  if (poller) {
+    clearInterval(poller);
+    poller = null;
+  }
+  if (!pollerTick) return;
+  const ms = Math.max(15, Math.min(600, Math.round(intervalSec))) * 1000;
+  poller = setInterval(() => {
+    if (pollerTick) void pollerTick();
+  }, ms);
+}
+
+/**
+ * Re-arm the background poller at a new cadence. Called by the main
+ * process when the user changes `nodeRefreshIntervalSec` in settings.
+ * No-op if `startPoller` has not run yet.
+ */
+export function restartPollerCadence(intervalSec: number): void {
+  armPoller(intervalSec);
 }
 
 export function stopPoller(): void {
@@ -634,6 +1112,8 @@ export function stopPoller(): void {
     clearInterval(poller);
     poller = null;
   }
+  pollerTick = null;
+  for (const id of Array.from(fastPollers.keys())) stopFastPoll(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -803,38 +1283,106 @@ export async function updateNodePricing(
   try {
     const signer = await signerFromMnemonic(mnemonic);
     const [{ address: from }] = await signer.getAccounts();
-    const { client, disconnect } = await signClient(signer);
-    try {
-      // One generous fee — MsgUpdateNodeDetails is similar weight to MsgSend.
-      const settings = await getSettings();
-      const gas = 250_000;
-      const feeUdvpn = String(Math.max(1, Math.ceil(gas * Number(settings.gasPriceUdvpn))));
-      const fee = { amount: [{ denom: DENOM, amount: feeUdvpn }], gas: String(gas) };
-      const gbBase =
-        opts.priceMode === 'oracle' ? formatBase(opts.usdGigabytePrice ?? 0) : '0';
-      const hrBase =
-        opts.priceMode === 'oracle' ? formatBase(opts.usdHourlyPrice ?? 0) : '0';
-      const result = await client.nodeUpdateDetails({
+
+    // One generous fee — MsgUpdateNodeDetails is similar weight to MsgSend.
+    const settings = await getSettings();
+    const gas = 250_000;
+    const feeUdvpn = String(Math.max(1, Math.ceil(gas * Number(settings.gasPriceUdvpn))));
+    const fee = { amount: [{ denom: DENOM, amount: feeUdvpn }], gas: String(gas) };
+    const gbBase =
+      opts.priceMode === 'oracle' ? formatBase(opts.usdGigabytePrice ?? 0) : '0';
+    const hrBase =
+      opts.priceMode === 'oracle' ? formatBase(opts.usdHourlyPrice ?? 0) : '0';
+    // The SDK's signing-client helper reuses `args.from` as both the
+    // CosmJS signer-address (used to look up the on-chain account, which
+    // requires the `sent…` HRP) and the proto-message `from` field (which
+    // the node module enforces as `sentnode…`). Those are two different
+    // bech32 prefixes for the same 20-byte payload, so we have to bypass
+    // the helper and construct the encode object manually: sign as the
+    // operator (`sent…`), but populate the message with the node identity
+    // (`sentnode…`).
+    const updateMsg = {
+      typeUrl: '/sentinel.node.v3.MsgUpdateNodeDetailsRequest',
+      value: {
         from: accountToNodeAddr(from),
         gigabytePrices: [
-          { denom: DENOM, baseValue: gbBase, quoteValue: String(giga) } as never,
+          { denom: DENOM, baseValue: gbBase, quoteValue: String(giga) },
         ],
         hourlyPrices: [
-          { denom: DENOM, baseValue: hrBase, quoteValue: String(hour) } as never,
+          { denom: DENOM, baseValue: hrBase, quoteValue: String(hour) },
         ],
         remoteUrl: stripToHostSafe(remoteAddr),
-        fee,
-        memo: `update pricing ${node.moniker}`,
-      } as never);
-      if (result.code !== 0) {
-        await addEvent({
-          kind: 'withdraw-failed',
-          title: `Pricing update failed: ${node.moniker}`,
-          subtitle: (result.rawLog ?? `code ${result.code}`).slice(0, 160),
-          relatedNodeId: nodeId,
-        });
-        return { ok: false, error: result.rawLog ?? `Broadcast rejected (${result.code})` };
+      },
+    };
+
+    // Mainnet RPC reads of /auth/account can lag the canonical sequence by
+    // a block or two (the read RPC and the broadcast RPC are independent
+    // peers, and CosmJS pre-fetches sequence at signing time). Retry on
+    // "account sequence mismatch" with a fresh signing client (which
+    // re-reads the account) before giving up.
+    const MAX_BROADCAST_ATTEMPTS = 4;
+    const RETRY_DELAY_MS = 4_000;
+    type BroadcastResult = { code: number; rawLog?: string; transactionHash: string };
+    let result: BroadcastResult | null = null;
+    let lastErr = '';
+    for (let attempt = 1; attempt <= MAX_BROADCAST_ATTEMPTS; attempt++) {
+      let opened: Awaited<ReturnType<typeof signClient>> | null = null;
+      try {
+        opened = await signClient(signer);
+      } catch (connErr) {
+        lastErr = (connErr as Error).message;
+        // pickRPC() throws "Could not connect to the Sentinel network..." when every
+        // configured RPC fails its health check in one window — on a flaky home
+        // connection that can clear in a few seconds, so treat it as transient.
+        const transient =
+          /timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo|EAI_AGAIN|Could not connect to the Sentinel network|none responded/i.test(
+            lastErr,
+          );
+        if (!transient || attempt === MAX_BROADCAST_ATTEMPTS) {
+          break;
+        }
+        log.warn('updatePricing signClient connect failed, retrying', { attempt, err: lastErr.slice(0, 160) });
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        continue;
       }
+      try {
+        result = (await opened.client.signAndBroadcast(
+          from,
+          [updateMsg as never],
+          fee,
+          `update pricing ${node.moniker}`,
+        )) as BroadcastResult;
+      } catch (bcErr) {
+        lastErr = (bcErr as Error).message;
+        result = null;
+        const transient = /timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|sequence mismatch/i.test(lastErr);
+        if (!transient || attempt === MAX_BROADCAST_ATTEMPTS) {
+          break;
+        }
+        log.warn('updatePricing broadcast threw, retrying', { attempt, err: lastErr.slice(0, 160) });
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        continue;
+      } finally {
+        opened.disconnect();
+      }
+      if (result.code === 0) break;
+      lastErr = result.rawLog ?? `code ${result.code}`;
+      const transient = /account sequence mismatch|sequence mismatch/i.test(lastErr);
+      if (!transient || attempt === MAX_BROADCAST_ATTEMPTS) break;
+      log.warn('updatePricing sequence-mismatch, retrying', { attempt, err: lastErr.slice(0, 160) });
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+
+    if (!result || result.code !== 0) {
+      await addEvent({
+        kind: 'withdraw-failed',
+        title: `Pricing update failed: ${node.moniker}`,
+        subtitle: lastErr.slice(0, 160),
+        relatedNodeId: nodeId,
+      });
+      return { ok: false, error: lastErr || `Broadcast rejected` };
+    }
+    {
       await updateNode(nodeId, {
         gigabytePriceDVPN,
         hourlyPriceDVPN,
@@ -854,8 +1402,6 @@ export async function updateNodePricing(
         txHash: result.transactionHash,
       });
       return { ok: true, txHash: result.transactionHash };
-    } finally {
-      disconnect();
     }
   } catch (err) {
     return { ok: false, error: (err as Error).message };

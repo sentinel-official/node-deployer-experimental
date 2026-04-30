@@ -10,32 +10,10 @@ import {
   tokenize,
   type CliCommand,
 } from '../lib/cli';
-import type { CliServerState, CliStreamEvent } from '../../../shared/types';
 
-interface OutputEntry {
-  id: number;
-  kind: 'input' | 'ok' | 'err' | 'info';
-  source?: 'app' | 'shell' | 'agent' | 'system';
-  text: string;
-  // Whether this entry was produced by a recurring read-only poll (e.g.
-  // `deploy.status`). Set on the input event and propagated to the next
-  // ok/err event from the same source so the "Hide poll spam" toggle can
-  // collapse them as a unit. We keep them in state so toggling the filter
-  // back on instantly restores the full log.
-  poll?: boolean;
-}
-
-const INITIAL_OUTPUT: OutputEntry = {
-  id: 0,
-  kind: 'info',
-  text:
-    'Sentinel Node Manager — built-in CLI. Type `help` for the full command list, or click any command on the left to insert it. Use the arrow keys to recall previous commands.',
-};
-
-// Read-only commands that are commonly hammered in a polling loop. Their
-// input + reply lines are flagged as "poll spam" so the user can hide them
-// during a recording without losing the actually interesting output.
-const POLL_COMMANDS = new Set([
+// Local helper: detect poll-y commands typed inline in the renderer
+// fallback path. The store owns the same set for stream events.
+const RENDERER_POLL_COMMANDS = new Set([
   'deploy.status',
   'nodes.list',
   'nodes.get',
@@ -49,90 +27,48 @@ const POLL_COMMANDS = new Set([
   'events.list',
   'docker.overview',
 ]);
-
-function commandFromInput(text: string): string | null {
-  // Strip the leading "$ " prefix the server adds to input events, then
-  // take the first whitespace-separated token as the command name.
+function rendererCommandFromInput(text: string): string | null {
   const stripped = text.startsWith('$ ') ? text.slice(2) : text;
   const tok = stripped.trim().split(/\s+/)[0];
   return tok || null;
 }
-
-function isPollInput(text: string): boolean {
-  const cmd = commandFromInput(text);
-  return cmd != null && POLL_COMMANDS.has(cmd);
+function rendererIsPollInput(text: string): boolean {
+  const cmd = rendererCommandFromInput(text);
+  return cmd != null && RENDERER_POLL_COMMANDS.has(cmd);
 }
 
 export function CLI() {
-  const { pushToast } = useApp();
+  const {
+    pushToast,
+    cliOutput: output,
+    cliHistory: history,
+    cliServerState: serverState,
+    appendCliOutput,
+    clearCliOutput,
+    pushCliHistory,
+    setCliServerState,
+  } = useApp();
   const [filter, setFilter] = useState('');
   const [input, setInput] = useState('');
-  const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number>(-1);
-  const [output, setOutput] = useState<OutputEntry[]>([INITIAL_OUTPUT]);
   const [running, setRunning] = useState(false);
-  const [serverState, setServerState] = useState<CliServerState | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
   const [hidePollSpam, setHidePollSpam] = useState(true);
-  const idRef = useRef(1);
   const outRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const lastSeqRef = useRef<number>(-1);
-  // Tracks whether the most recent input from each source was a poll
-  // command so we can flag the matching ok/err reply that follows. The
-  // server interleaves events per source (app / shell / agent), so keying
-  // by source keeps two concurrent clients from cross-tagging each other.
-  const pendingPollBySource = useRef<Map<string, boolean>>(new Map());
 
-  const append = (entry: Omit<OutputEntry, 'id'>) =>
-    setOutput((prev) => [...prev, { id: idRef.current++, ...entry }]);
-
-  // ─── server subscriptions ──────────────────────────────────────────────────
+  // Preload may be missing in dev after HMR on preload-side edits. Surface a
+  // synthetic state so the screen renders something useful instead of crashing.
   useEffect(() => {
-    // Preload may be stale (e.g. dev HMR after preload edits) — guard so the
-    // screen doesn't crash; the user just sees "Server off" until reload.
-    const cli = window.api?.cli;
-    if (!cli) {
-      setServerState({
+    if (!window.api?.cli && !serverState) {
+      setCliServerState({
         status: 'off',
         endpoint: null,
         sessionStartedAt: null,
         discoveryPath: null,
         error: 'Preload bridge missing window.api.cli — reload the app window.',
       });
-      return;
     }
-    let cancelled = false;
-    void cli.status().then((s) => {
-      if (!cancelled) setServerState(s);
-    });
-    const offState = cli.onStateChanged((s) => setServerState(s));
-    const offStream = cli.onStream((ev: CliStreamEvent) => {
-      // Drop duplicates if the renderer reconnects mid-session.
-      if (ev.seq <= lastSeqRef.current) return;
-      lastSeqRef.current = ev.seq;
-      let poll = false;
-      const src = ev.source ?? 'app';
-      if (ev.kind === 'input') {
-        poll = isPollInput(ev.text);
-        pendingPollBySource.current.set(src, poll);
-      } else if (ev.kind === 'ok' || ev.kind === 'err') {
-        poll = pendingPollBySource.current.get(src) === true;
-        pendingPollBySource.current.delete(src);
-      } else if (ev.kind === 'info' && ev.source === 'system') {
-        // Shell connect/disconnect chatter is part of the same noise the
-        // poll filter is meant to hide.
-        poll =
-          /connected\. In-app prompt is now read-only/.test(ev.text) ||
-          /disconnected\. In-app prompt re-enabled/.test(ev.text);
-      }
-      append({ kind: ev.kind, source: ev.source, text: ev.text, poll });
-    });
-    return () => {
-      cancelled = true;
-      offState();
-      offStream();
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -173,7 +109,7 @@ export function CLI() {
     setServerBusy(true);
     try {
       const s = await window.api.cli.start();
-      setServerState(s);
+      setCliServerState(s);
       if (s.error) {
         pushToast({ title: 'CLI server failed to start', body: s.error, tone: 'error' });
       } else {
@@ -194,7 +130,7 @@ export function CLI() {
     setServerBusy(true);
     try {
       const s = await window.api.cli.stop();
-      setServerState(s);
+      setCliServerState(s);
       pushToast({ title: 'CLI server stopped', tone: 'info' });
     } finally {
       setServerBusy(false);
@@ -232,9 +168,9 @@ export function CLI() {
     // even before the user starts the server.
     const tokens = tokenize(trimmed);
     const cmd = COMMANDS_BY_NAME[tokens[0]];
-    const poll = POLL_COMMANDS.has(tokens[0]);
+    const poll = RENDERER_POLL_COMMANDS.has(tokens[0]);
     if (!cmd) {
-      append({
+      appendCliOutput({
         kind: 'err',
         text: `Unknown command: ${tokens[0]}. Type 'help' to see every command.`,
       });
@@ -250,9 +186,9 @@ export function CLI() {
           : typeof result === 'string'
             ? result
             : JSON.stringify(result, null, 2);
-      append({ kind: 'ok', text: formatted, poll });
+      appendCliOutput({ kind: 'ok', text: formatted, poll });
     } catch (err) {
-      append({ kind: 'err', text: (err as Error).message, poll });
+      appendCliOutput({ kind: 'err', text: (err as Error).message, poll });
     } finally {
       setRunning(false);
     }
@@ -272,7 +208,7 @@ export function CLI() {
       }
       void r;
     } catch (err) {
-      append({ kind: 'err', text: (err as Error).message });
+      appendCliOutput({ kind: 'err', text: (err as Error).message });
     } finally {
       setRunning(false);
     }
@@ -281,15 +217,15 @@ export function CLI() {
   const run = async (line: string) => {
     const trimmed = line.trim();
     if (!trimmed) return;
-    setHistory((h) => [...h, trimmed]);
+    pushCliHistory(trimmed);
     setHistoryIdx(-1);
 
     if (trimmed === 'clear' || trimmed === 'cls') {
-      setOutput([]);
+      clearCliOutput();
       return;
     }
     if (trimmed === 'help') {
-      append({ kind: 'input', text: `$ ${trimmed}` });
+      appendCliOutput({ kind: 'input', text: `$ ${trimmed}` });
       const lines = [
         'Available commands:',
         ...COMMANDS.map((c) => `  ${c.name.padEnd(28)} ${c.summary}`),
@@ -300,7 +236,7 @@ export function CLI() {
         '',
         'Tip: click any command on the left to insert its usage; ↑/↓ recalls history.',
       ].join('\n');
-      append({ kind: 'info', text: lines });
+      appendCliOutput({ kind: 'info', text: lines });
       return;
     }
 
@@ -311,8 +247,8 @@ export function CLI() {
     }
 
     // Server off → run in renderer (legacy fallback path).
-    const poll = isPollInput(`$ ${trimmed}`);
-    append({ kind: 'input', text: `$ ${trimmed}`, poll });
+    const poll = rendererIsPollInput(`$ ${trimmed}`);
+    appendCliOutput({ kind: 'input', text: `$ ${trimmed}`, poll });
     await runLocally(line, trimmed);
   };
 
@@ -659,7 +595,7 @@ export function CLI() {
                 <button
                   className="btn btn-ghost btn-sm"
                   title="Clear output"
-                  onClick={() => setOutput([])}
+                  onClick={() => clearCliOutput()}
                 >
                   <MIcon name="cleaning_services" size={12} />
                   Clear

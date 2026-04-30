@@ -34,6 +34,14 @@ export const fmtUSD = (n: number): string =>
     maximumFractionDigits: 2,
   });
 
+export const fmtBytes = (bytes: number, digits = 1): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const n = bytes / Math.pow(1024, i);
+  return `${fmtAmount(n, i === 0 ? 0 : digits)} ${units[i]}`;
+};
+
 export const shortAddr = (addr: string | null | undefined, head = 8, tail = 6): string => {
   if (!addr) return '—';
   if (addr.length <= head + tail + 1) return addr;
