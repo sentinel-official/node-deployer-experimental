@@ -14,10 +14,10 @@ DVPN, real Docker keygen, real signed broadcasts.
 |---|---|
 | 0. Server reachability | `system.report`, `settings.chainHealth` (≥1 RPC reachable) |
 | 1. Inventory (read-only) | `wallet.get` (+ balance gate), `wallet.refreshBalance`, `nodes.list`, `events.list`, `docker.overview`, `updater.status`, `settings.get`, `wallet.qrSvg` |
-| 2. Validation contract | Negative cases: missing positionals, missing flags, unreachable SSH host — must reject gracefully, never crash |
+| 2. Validation contract | Negative cases: missing positionals, missing flags, unreachable SSH host — must reject gracefully, never crash. Also exercises `ssh.forgetHostKey` (drops a TOFU pin so a rebuilt server's new key can be re-pinned) — must not throw on hosts that were never pinned |
 | 3. **Real-money self-send** | `wallet.send --to <ownAddress> --amount 0.001 --memo cli-e2e-XXXX`, hash verified via RPC `tx_search` (block + code 0) |
 | 4. Local deploy | `deploy.start --target local`, polled `deploy.status` to `phase=done` (≤ 600 s); also asserts the CLI server **redacts `mnemonicForBackup`** so the seed never leaves the in-app reveal flow |
-| 5. Inspect | `nodes.get`, `nodes.status`, `nodes.history --window 1h`, `nodes.logs` |
+| 5. Inspect | `nodes.get`, `nodes.status`, `nodes.history --window 1h`, `nodes.logs`, `nodes.publishSpecs` (specs:v1 self-MsgSend memo — **idempotent**: second call returns the same `txHash` without spending) |
 | 6. **Real-money pricing update** | `nodes.updatePricing` (MsgUpdateNodeDetails), hash verified via RPC `tx_search` |
 | 7. Lifecycle | `nodes.stop` → `nodes.start` → `nodes.restart` |
 | 8. Cleanup | `nodes.remove` for the e2e node only; existing nodes are untouched |
@@ -25,15 +25,20 @@ DVPN, real Docker keygen, real signed broadcasts.
 
 ## Cost
 
-The harness broadcasts at most **two transactions**:
+The harness broadcasts at most **three transactions**:
 
 1. `wallet.send` — self-send of `0.001 DVPN` (returns to your own wallet).
 2. `nodes.updatePricing` — sets `gb=0.06 hr=0.0011` on the freshly
    deployed e2e node.
+3. `nodes.publishSpecs` — self-MsgSend with the `specs:v1` memo from the
+   node operator wallet. Idempotent: only broadcasts once per node; a
+   re-run returns the cached `txHash` without spending again.
 
-Estimated total fees: **≤ 0.0015 DVPN** (each TX is roughly 0.0002–0.0003
-DVPN of gas). The harness refuses to start unless the wallet has at least
-**0.5 DVPN** free, so there is plenty of headroom over the actual spend.
+Estimated total fees: **≤ 0.0025 DVPN** (each TX is roughly 0.0002–0.0003
+DVPN of gas; the specs publish runs at gas 250000 because the operator
+wallet may not yet exist on chain). The harness refuses to start unless
+the wallet has at least **0.5 DVPN** free, so there is plenty of headroom
+over the actual spend.
 
 ## Prerequisites
 
@@ -155,10 +160,10 @@ POST {RPC}/  (jsonrpc 2.0)
 never used.
 
 The CLI server **redacts `mnemonicForBackup` in `deploy.status`**
-(`cli-registry.ts:566-580`). The harness explicitly asserts the redaction
-holds — if a future change leaks the seed over the pipe, this test goes
-red. The mnemonic must be revealed only through the gated in-app reveal
-flow.
+(`cli-registry.ts` `deploy.status` exec — see `mnemonicForBackup`
+redaction line). The harness explicitly asserts the redaction holds —
+if a future change leaks the seed over the pipe, this test goes red.
+The mnemonic must be revealed only through the gated in-app reveal flow.
 
 ## Reading the report
 

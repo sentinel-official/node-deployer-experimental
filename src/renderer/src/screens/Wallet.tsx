@@ -139,7 +139,8 @@ export function Wallet() {
               onClick={async () => {
                 const ok = await confirm({
                   title: 'Log out of this wallet?',
-                  body: 'The encrypted recovery phrase will be removed from this device. The wallet can only be restored from Wallet Setup if you retain a copy of the recovery phrase.',
+                  body:
+                    'The encrypted recovery phrase will be removed from this device. You can only sign back in if you have a copy of the recovery phrase. Running nodes are not affected.',
                   tone: 'danger',
                   confirmLabel: 'Log out',
                   requireType: 'LOGOUT',

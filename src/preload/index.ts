@@ -110,6 +110,8 @@ const api = {
 
   ssh: {
     test: (creds: SSHCredentials): Promise<SSHTestResult> => ipcRenderer.invoke(IPC.SSH_TEST, creds),
+    forgetHostKey: (req: { host: string; port?: number }): Promise<{ ok: true }> =>
+      ipcRenderer.invoke(IPC.SSH_FORGET_HOST_KEY, req),
   },
 
   deploy: {
@@ -139,6 +141,11 @@ const api = {
       ipcRenderer.invoke(IPC.NODES_WITHDRAW, req),
     updatePricing: (req: UpdateNodePricingRequest): Promise<SendTxResult> =>
       ipcRenderer.invoke(IPC.NODES_UPDATE_PRICING, req),
+    publishSpecs: (
+      nodeId: string,
+      opts?: { force?: boolean },
+    ): Promise<{ ok: boolean; txHash?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC.NODES_PUBLISH_SPECS, nodeId, opts),
     backupMnemonic: (nodeId: string, mnemonic: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC.NODES_BACKUP_MNEMONIC, nodeId, mnemonic),
     exportMnemonic: (nodeId: string, mnemonic: string): Promise<MnemonicExportResult> =>

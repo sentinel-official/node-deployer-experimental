@@ -61,6 +61,13 @@ export async function readStore(): Promise<StoreShape> {
   return cached;
 }
 
+/** Drop the in-memory cache so the next `readStore()` reads from disk
+ *  (or falls back to defaults if the file is gone). Used by full-reset
+ *  flows like wallet logout. */
+export function resetStoreCache(): void {
+  cached = null;
+}
+
 export async function writeStore(next: StoreShape): Promise<void> {
   cached = next;
   const target = storePath();

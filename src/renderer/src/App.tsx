@@ -16,6 +16,7 @@ import { ManageDocker } from './screens/ManageDocker';
 import { CLI } from './screens/CLI';
 import { Activity } from './screens/Activity';
 import { System } from './screens/System';
+import { OnChainSpecs } from './screens/OnChainSpecs';
 
 export default function App() {
   const { route, bootstrap, walletBootstrapped, bootError } = useApp();
@@ -83,6 +84,7 @@ export default function App() {
       {route.name === 'manage-docker' && <ManageDocker />}
       {route.name === 'cli' && <CLI />}
       {route.name === 'activity' && <Activity />}
+      {route.name === 'on-chain-specs' && <OnChainSpecs />}
       {route.name === 'system' && <System />}
       {route.name === 'help' && <Help />}
     </Layout>

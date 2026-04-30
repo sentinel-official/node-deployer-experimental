@@ -305,8 +305,10 @@ export async function hasImage(tag: string): Promise<boolean> {
 export async function ensureImage(
   tag: string,
   onLog: (line: string) => void = () => undefined,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (await hasImage(tag)) return;
+  if (signal?.aborted) throw new Error('Image build aborted before start');
   const c = await getClient();
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sentinel-dvpnx-build-'));
@@ -340,15 +342,17 @@ export async function ensureImage(
     // this we tear down the build stream so dockerode releases the pipe.
     const BUILD_TIMEOUT_MS = 15 * 60 * 1000;
     let buildTimer: NodeJS.Timeout | null = null;
+    let abortHandler: (() => void) | null = null;
     await new Promise<void>((resolve, reject) => {
-      buildTimer = setTimeout(() => {
+      const destroyStream = (err: Error) => {
         try {
-          (stream as NodeJS.ReadableStream & { destroy?: (err?: Error) => void }).destroy?.(
-            new Error('build timeout'),
-          );
+          (stream as NodeJS.ReadableStream & { destroy?: (err?: Error) => void }).destroy?.(err);
         } catch {
           /* ignore */
         }
+      };
+      buildTimer = setTimeout(() => {
+        destroyStream(new Error('build timeout'));
         reject(
           new Error(
             `Image build of ${tag} timed out after ${BUILD_TIMEOUT_MS / 60_000} minutes. ` +
@@ -356,10 +360,23 @@ export async function ensureImage(
           ),
         );
       }, BUILD_TIMEOUT_MS);
+      if (signal) {
+        abortHandler = () => {
+          onLog('[docker] build aborted by user — tearing down stream');
+          destroyStream(new Error('build aborted'));
+          reject(new Error('Image build aborted'));
+        };
+        if (signal.aborted) {
+          abortHandler();
+        } else {
+          signal.addEventListener('abort', abortHandler, { once: true });
+        }
+      }
       c.modem.followProgress(
         stream,
         (err) => {
           if (buildTimer) clearTimeout(buildTimer);
+          if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
           err ? reject(err) : resolve();
         },
         (evt: { stream?: string; error?: string }) => {

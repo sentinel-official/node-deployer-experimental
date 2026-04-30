@@ -353,6 +353,7 @@ export type EventKind =
   | 'deploy-started'
   | 'deploy-succeeded'
   | 'deploy-failed'
+  | 'node-started'
   | 'node-stopped'
   | 'node-restarted'
   | 'node-removed'
@@ -360,6 +361,7 @@ export type EventKind =
   | 'node-online'
   | 'node-registered'
   | 'specs-reported'
+  | 'specs-publish-failed'
   | 'withdraw-sent'
   | 'withdraw-failed'
   | 'balance-refreshed';
@@ -541,6 +543,7 @@ export const IPC = {
 
   // SSH helpers for remote deploy
   SSH_TEST: 'ssh:test',
+  SSH_FORGET_HOST_KEY: 'ssh:forget-host-key',
 
   // Deploy lifecycle
   DEPLOY_START: 'deploy:start',
@@ -564,6 +567,7 @@ export const IPC = {
   NODES_EXPORT_MNEMONIC: 'nodes:export-mnemonic',
   NODES_REVEAL_MNEMONIC: 'nodes:reveal-mnemonic',
   NODES_UPDATE_PRICING: 'nodes:update-pricing',
+  NODES_PUBLISH_SPECS: 'nodes:publish-specs',
   NODES_REAP_STUCK: 'nodes:reap-stuck',
   NODES_CHANGED: 'nodes:changed', // main -> renderer push
   NODES_LIVE_STATUS: 'nodes:live-status', // main -> renderer push (per-node)

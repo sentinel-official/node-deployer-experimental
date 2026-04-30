@@ -34,7 +34,6 @@ export function NodeDetails({ id }: Props) {
   const [revealLoading, setRevealLoading] = useState(false);
 
   useEffect(() => {
-    if (!node) return;
     let mounted = true;
     const tick = () => {
       void refreshStatus(id).catch(() => {});
@@ -47,10 +46,10 @@ export function NodeDetails({ id }: Props) {
       mounted = false;
       clearInterval(iv);
     };
-  }, [id, node, refreshStatus]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
   useEffect(() => {
-    if (!node) return;
     let mounted = true;
     void window.api.nodes
       .history(id, range)
@@ -61,7 +60,7 @@ export function NodeDetails({ id }: Props) {
     return () => {
       mounted = false;
     };
-  }, [id, node, range]);
+  }, [id, range]);
 
   const chartSamples = useMemo(
     () => history.map((s) => ({ ts: s.ts, peers: s.peers })),
@@ -364,6 +363,57 @@ export function NodeDetails({ id }: Props) {
               <MIcon name="refresh" size={14} />
               Refresh
             </button>
+            {(() => {
+              const specsReady = Boolean(node.specsTxHash);
+              const specsPending = !specsReady && node.specsPublishPending === true;
+              return (
+                <button
+                  className="btn btn-secondary justify-center"
+                  disabled={!specsReady}
+                  aria-disabled={!specsReady}
+                  onClick={() => {
+                    if (!specsReady) return;
+                    navigate({
+                      name: 'activity',
+                      kinds: ['specs-reported'],
+                      nodeId: id,
+                    });
+                  }}
+                  style={
+                    !specsReady
+                      ? { opacity: 0.65, cursor: 'not-allowed', minWidth: 240 }
+                      : { minWidth: 240 }
+                  }
+                  title={
+                    specsReady
+                      ? 'Open Activity feed pre-filtered to on-chain hardware-specs reports for this node'
+                      : specsPending
+                        ? 'Broadcasting specs:v1 memo on-chain — this button unlocks once the tx lands.'
+                        : 'No specs broadcast for this node yet — wait for the deploy to publish, then this unlocks.'
+                  }
+                >
+                  {specsPending ? (
+                    <span
+                      aria-hidden
+                      className="ring-spin"
+                      style={{
+                        width: 14,
+                        height: 14,
+                        borderRadius: '50%',
+                        border: '2px solid var(--border)',
+                        borderTopColor: 'var(--accent)',
+                        flexShrink: 0,
+                      }}
+                    />
+                  ) : (
+                    <MIcon name={specsReady ? 'memory' : 'lock'} size={14} />
+                  )}
+                  {specsPending
+                    ? 'Posting on-chain…'
+                    : 'View On-Chain Specs Reporting'}
+                </button>
+              );
+            })()}
             <button
               className="btn btn-secondary"
               onClick={() => {
@@ -409,9 +459,9 @@ export function NodeDetails({ id }: Props) {
 
       {/* Stat row */}
       <div className="grid grid-cols-12 gap-3">
-        <div className="stat-card col-span-6 lg:col-span-3">
+        <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
           <div className="stat-label">Operator balance</div>
-          <div className="flex items-end justify-between gap-2">
+          <div className="flex items-center justify-center gap-2 flex-wrap">
             <div className="stat-value" style={{ color: 'var(--accent)' }}>
               {fmtDVPN(node.balanceDVPN)}{' '}
               <span className="text-sm font-semibold" style={{ color: 'var(--text-dim)' }}>
@@ -429,7 +479,7 @@ export function NodeDetails({ id }: Props) {
             </button>
           </div>
         </div>
-        <div className="stat-card col-span-6 lg:col-span-3">
+        <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
           <div className="stat-label">Chain status</div>
           <div
             className="stat-value"
@@ -441,7 +491,7 @@ export function NodeDetails({ id }: Props) {
             {status?.reachable ? 'On-chain reachable' : 'Awaiting registration'}
           </div>
         </div>
-        <div className="stat-card col-span-6 lg:col-span-3">
+        <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
           <div className="stat-label">Active sessions</div>
           <div className="stat-value">{status?.reachable ? status.sessions.toLocaleString() : '—'}</div>
           <div className="stat-sub">
@@ -450,7 +500,7 @@ export function NodeDetails({ id }: Props) {
               : 'waiting'}
           </div>
         </div>
-        <div className="stat-card col-span-6 lg:col-span-3">
+        <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
           <div className="stat-label">Uptime</div>
           <div className="stat-value">{uptime}</div>
           <div className="stat-sub">

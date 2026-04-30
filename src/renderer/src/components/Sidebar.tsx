@@ -22,6 +22,7 @@ const TOP: Item[] = [
 ];
 
 const BOTTOM: Item[] = [
+  { key: 'on-chain-specs', label: 'On-Chain Specs', icon: 'receipt_long', route: { name: 'on-chain-specs' } },
   { key: 'system', label: 'System', icon: 'memory', route: { name: 'system' } },
   { key: 'settings', label: 'Settings', icon: 'settings', route: { name: 'settings' } },
   { key: 'help', label: 'Help', icon: 'help', route: { name: 'help' } },

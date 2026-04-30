@@ -61,6 +61,7 @@ import {
   withdrawFromNode,
   updateNodePricing,
 } from './nodes';
+import { publishNodeSpecs } from './node-specs';
 import { listEvents } from './events';
 import { getSettings, updateSettings } from './settings';
 import {
@@ -784,6 +785,26 @@ export const MAIN_COMMANDS: MainCliCommand[] = [
         usdHourlyPrice: req.usdHourlyPrice,
       });
     },
+  },
+  {
+    name: 'nodes.publishSpecs',
+    group: 'nodes',
+    summary:
+      'Publish on-chain hardware specs (specs:v1 self-MsgSend memo). Idempotent by default — pass --force to bypass and post a fresh attestation.',
+    usage: 'nodes.publishSpecs <nodeId> [--force]',
+    args: [
+      { name: 'nodeId', kind: 'positional', required: true, describe: 'Node id.' },
+      {
+        name: 'force',
+        kind: 'flag',
+        required: false,
+        describe: 'Bypass the idempotency short-circuit and post a fresh on-chain attestation.',
+      },
+    ],
+    exec: (p) =>
+      publishNodeSpecs(requirePositional(p, 0, 'nodeId'), {
+        force: p.flags.force === true || p.flags.force === 'true',
+      }),
   },
   {
     name: 'nodes.backupMnemonic',

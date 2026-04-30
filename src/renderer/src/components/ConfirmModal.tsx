@@ -64,7 +64,7 @@ export function ConfirmModal() {
       >
         <div className="flex items-start gap-3">
           <div
-            className="h-10 w-10 rounded-lg grid place-items-center flex-shrink-0"
+            className="h-10 w-10 rounded-lg grid place-items-center flex-shrink-0 mt-0.5"
             style={{
               background: `color-mix(in srgb, ${toneColor} 15%, transparent)`,
               color: toneColor,
@@ -72,12 +72,12 @@ export function ConfirmModal() {
           >
             <MIcon name={iconName} size={22} />
           </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-base font-semibold" style={{ color: 'var(--text)' }}>
+          <div className="flex-1 min-w-0 pt-1">
+            <div className="text-base font-semibold leading-6" style={{ color: 'var(--text)' }}>
               {confirmPrompt.title}
             </div>
             {confirmPrompt.body && (
-              <div className="mt-1 text-sm break-words" style={{ color: 'var(--text-dim)' }}>
+              <div className="mt-1.5 text-sm leading-relaxed break-words whitespace-pre-line" style={{ color: 'var(--text-dim)' }}>
                 {confirmPrompt.body}
               </div>
             )}

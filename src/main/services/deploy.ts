@@ -21,7 +21,7 @@ import { readStore, writeStore } from './store';
 import { addEvent } from './events';
 import { fetchBalance, generateNodeKey, sendTokens } from './wallet';
 import { formatPrices } from './price';
-import { ensureNodePersisted, getNode, nodeDataDir, rememberSSH, startNode, updateNode } from './node-manager';
+import { ensureNodePersisted, getNode, nodeDataDir, rememberSSH, removeNode, startNode, updateNode } from './node-manager';
 import { uploadFile, withSSH, runRemote, shellQuote } from './ssh';
 import { captureLocalSpecs, publishNodeSpecs } from './node-specs';
 import type { Client } from 'ssh2';
@@ -301,7 +301,10 @@ export async function startDeploy(
       } else {
         await runLocalDeploy(req, node, nodeMnemonic, push, () => cancelled, abort.signal);
       }
-      if (cancelled) return;
+      if (cancelled) {
+        await purgeCancelledNode(nodeId);
+        return;
+      }
       // push() adds mnemonicForBackup + operatorAddress for 'done' automatically.
       push('done', 100, 'Node is online', `[${ts()}] ${node.moniker} is online on port ${node.port}.`);
       await addEvent({
@@ -310,6 +313,19 @@ export async function startDeploy(
         subtitle: req.target === 'remote' ? `Remote · ${req.ssh?.host}` : 'Local device',
         relatedNodeId: nodeId,
       });
+      // Remote deploys construct the container directly via SSH-driven
+      // `docker run` and never pass through startNode, so the `node-started`
+      // emit baked into startNode never fires for them. Emit it here for
+      // remote-only — local deploys already get one from startNode at the
+      // verified-container-up gate.
+      if (req.target === 'remote') {
+        await addEvent({
+          kind: 'node-started',
+          title: `Node ${node.moniker} started`,
+          subtitle: `Remote · ${req.ssh?.host}`,
+          relatedNodeId: nodeId,
+        });
+      }
 
       // Mark the node as awaiting on-chain spec publish; the actual broadcast
       // is fire-and-forget so a transient RPC outage doesn't make `deploy`
@@ -330,7 +346,7 @@ export async function startDeploy(
             'Node is online',
             `[${ts()}] Publishing hardware specs on-chain (specs:v1)…`,
           );
-          const specsRes = await publishNodeSpecs(nodeId);
+          const specsRes = await publishNodeSpecs(nodeId, { force: true });
           if (specsRes.ok) {
             push(
               'done',
@@ -348,28 +364,32 @@ export async function startDeploy(
     } catch (err) {
       const msg = (err as Error).message ?? 'Unknown error';
       log.error('deploy failed', { id: nodeId, err: msg });
-      push('error', 0, 'Deployment failed', `[${ts()}] ${msg}`);
-      await addEvent({
-        kind: 'deploy-failed',
-        title: `Deployment failed: ${node.moniker}`,
-        subtitle: msg.slice(0, 180),
-        relatedNodeId: nodeId,
-      });
-      // Drop the failed node from the inventory so the user isn't left
-      // with a zombie entry. Any transient backup / logs / metrics for
-      // the nodeId are purged too.
-      try {
-        const s = await readStore();
-        s.nodes = s.nodes.filter((x) => x.id !== nodeId);
-        delete s.logs[nodeId];
-        delete s.nodeBackups[nodeId];
-        await writeStore(s);
-        const { BrowserWindow } = await import('electron');
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send('nodes:changed', null);
+      if (cancelled) {
+        await purgeCancelledNode(nodeId);
+      } else {
+        push('error', 0, 'Deployment failed', `[${ts()}] ${msg}`);
+        await addEvent({
+          kind: 'deploy-failed',
+          title: `Deployment failed: ${node.moniker}`,
+          subtitle: msg.slice(0, 180),
+          relatedNodeId: nodeId,
+        });
+        // Drop the failed node from the inventory so the user isn't left
+        // with a zombie entry. Any transient backup / logs / metrics for
+        // the nodeId are purged too.
+        try {
+          const s = await readStore();
+          s.nodes = s.nodes.filter((x) => x.id !== nodeId);
+          delete s.logs[nodeId];
+          delete s.nodeBackups[nodeId];
+          await writeStore(s);
+          const { BrowserWindow } = await import('electron');
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send('nodes:changed', null);
+          }
+        } catch (cleanupErr) {
+          log.warn('failed-deploy cleanup errored', { err: String(cleanupErr) });
         }
-      } catch (cleanupErr) {
-        log.warn('failed-deploy cleanup errored', { err: String(cleanupErr) });
       }
     } finally {
       jobs.delete(jobId);
@@ -416,6 +436,36 @@ export function cancelDeploy(jobId: string): boolean {
     log.warn('cancel broadcast failed', { jobId, err: String(e) });
   }
   return true;
+}
+
+/**
+ * Tear down everything a cancelled deploy may have created so the user isn't
+ * left with a zombie node entry, a half-built container, or a populated
+ * remote data dir. Routes through removeNode (which handles container
+ * removal, data-dir cleanup, remote SSH teardown) and broadcasts a
+ * NODES_CHANGED so the UI refreshes immediately.
+ */
+async function purgeCancelledNode(nodeId: string): Promise<void> {
+  try {
+    await removeNode(nodeId);
+  } catch (err) {
+    log.warn('cancelled-deploy cleanup failed', { nodeId, err: String(err) });
+    // Belt-and-braces: even if removeNode threw mid-way, scrub the store
+    // entry so the renderer doesn't keep showing a phantom 'loading' node.
+    try {
+      const s = await readStore();
+      s.nodes = s.nodes.filter((x) => x.id !== nodeId);
+      delete s.logs[nodeId];
+      delete s.nodeBackups[nodeId];
+      await writeStore(s);
+      const { BrowserWindow } = await import('electron');
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('nodes:changed', null);
+      }
+    } catch (storeErr) {
+      log.warn('cancelled-deploy store scrub failed', { nodeId, err: String(storeErr) });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +534,18 @@ async function runLocalDeploy(
       'Preparing node image',
       `[${ts()}] tag=${IMAGE_TAG} (first build can take 5–15 min; cached thereafter)`,
     );
-    await ensureImage(IMAGE_TAG, (line) =>
-      push('image-build', 36, 'Preparing node image', line),
-    );
+    try {
+      await ensureImage(
+        IMAGE_TAG,
+        (line) => push('image-build', 36, 'Preparing node image', line),
+        signal,
+      );
+    } catch (buildErr) {
+      if (isCancelled() || signal.aborted) {
+        throw new Error('You cancelled the deploy while the node image was building.');
+      }
+      throw buildErr;
+    }
   }
 
   if (isCancelled()) return;

@@ -20,6 +20,8 @@ import {
   type UpdateNodePricingRequest,
 } from '../shared/types';
 import { testSSHConnection } from './services/ssh';
+import { forgetHostKey } from './services/host-keys';
+import { publishNodeSpecs } from './services/node-specs';
 import {
   startDeploy,
   cancelDeploy,
@@ -265,6 +267,20 @@ export function registerIpcHandlers(): void {
     (_e, creds: SSHCredentials): Promise<SSHTestResult> =>
       testSSHConnection(vSSHCredentials(creds)),
   );
+  ipcMain.handle(
+    IPC.SSH_FORGET_HOST_KEY,
+    async (_e, req: { host: string; port?: number }) => {
+      if (!req || typeof req !== 'object') throw new Error('Invalid forget-host-key request');
+      const host = String(req.host ?? '');
+      if (!HOSTNAME_RE.test(host)) throw new Error('Invalid SSH host');
+      const port = Number(req.port ?? 22);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Invalid SSH port');
+      }
+      await forgetHostKey(host, port);
+      return { ok: true };
+    },
+  );
 
   // -- Deploy ----------------------------------------------------------------
   ipcMain.handle(IPC.DEPLOY_START, async (_e, req: DeployRequest) => {
@@ -315,6 +331,15 @@ export function registerIpcHandlers(): void {
       usdHourlyPrice: req.usdHourlyPrice,
     });
   });
+  ipcMain.handle(
+    IPC.NODES_PUBLISH_SPECS,
+    async (_e, nodeId: string, opts?: { force?: boolean }) => {
+      enforceRate('nodes-publish-specs', 3, 0.2); // self-MsgSend on chain — keep tight
+      return publishNodeSpecs(vUUID(nodeId, 'node id'), {
+        force: !!opts?.force,
+      });
+    },
+  );
 
   ipcMain.handle(IPC.NODES_BACKUP_MNEMONIC, async (_e, nodeId: string, mnemonic: string) => {
     if (!safeStorage.isEncryptionAvailable()) {

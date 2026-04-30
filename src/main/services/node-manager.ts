@@ -461,9 +461,11 @@ function startFastPoll(id: string): void {
       // Push the fresh snapshot to the renderer so chainStatus flips live.
       broadcast(IPC.NODES_LIVE_STATUS, { nodeId: id, status });
       // Promote loading → online the same way the 60s poller does, but
-      // sooner. The poller's symmetric offline→? rule still owns the
-      // reverse direction (we only act while node.status === 'loading').
-      if (status.reachable) {
+      // sooner. The `node.status === 'loading'` gate keeps the event
+      // single-fire: once we've transitioned to online the fast-poller
+      // keeps ticking through the post-online grace window for live
+      // peer/uptime pushes, but must not re-emit `node-online` on every tick.
+      if (status.reachable && node.status === 'loading') {
         await transition(id, 'online');
         await addEvent({
           kind: 'node-online',
@@ -477,6 +479,7 @@ function startFastPoll(id: string): void {
         // poller: if the container has been running >60s and chain hasn't
         // caught up, still flip the UI to online.
         node.target === 'local' &&
+        node.status === 'loading' &&
         node.runtimeId &&
         node.startedAt &&
         Date.now() - Date.parse(node.startedAt) > 60_000 &&
@@ -580,6 +583,32 @@ export async function startNode(id: string): Promise<void> {
   const node = await getNode(id);
   if (!node) throw new Error('We couldn\'t find that node — it may have already been removed.');
 
+  // Per-start specs republish: fire-and-forget so a transient RPC outage
+  // never makes a successful node start look like it failed. Dynamic
+  // import avoids a circular dep with node-specs.ts. `force: true`
+  // bypasses the idempotency short-circuit on `specsTxHash` so every
+  // on/off cycle gets a fresh on-chain attestation.
+  const republishSpecs = () => {
+    void updateNode(id, { specsPublishPending: true }).then(async () => {
+      try {
+        const { publishNodeSpecs } = await import('./node-specs');
+        const res = await publishNodeSpecs(id, { force: true });
+        if (!res.ok) log.warn('per-start specs republish failed', { id, err: res.error });
+      } catch (err) {
+        log.warn('per-start specs republish threw', { id, err: (err as Error).message });
+      }
+    });
+  };
+
+  const emitStarted = async (subtitle: string) => {
+    await addEvent({
+      kind: 'node-started',
+      title: `Node ${node.moniker} started`,
+      subtitle,
+      relatedNodeId: id,
+    });
+  };
+
   if (node.target === 'local') {
     const name = containerName(node.id);
     try {
@@ -593,6 +622,8 @@ export async function startNode(id: string): Promise<void> {
       ) {
         await setRestartPolicy(node.runtimeId, 'unless-stopped');
         await updateNode(id, { status: 'online' });
+        await emitStarted('Local device · already running');
+        republishSpecs();
         return;
       }
       // Container exists but is stopped — start it and restore restart policy.
@@ -609,6 +640,8 @@ export async function startNode(id: string): Promise<void> {
             status: 'online',
             startedAt: new Date(now).toISOString(),
           });
+          await emitStarted('Local device · resumed container');
+          republishSpecs();
           log.info('node started (local, resumed)', { id, name });
           return;
         } catch {
@@ -632,6 +665,8 @@ export async function startNode(id: string): Promise<void> {
     const now = Date.now();
     startedAt.set(id, now);
     await updateNode(id, { status: 'online', runtimeId, startedAt: new Date(now).toISOString() });
+    await emitStarted('Local device · fresh container');
+    republishSpecs();
     log.info('node started (local)', { id, name });
   } else {
     const creds = sshKeyring.get(id);
@@ -652,6 +687,8 @@ export async function startNode(id: string): Promise<void> {
     const now = Date.now();
     startedAt.set(id, now);
     await updateNode(id, { status: 'online', startedAt: new Date(now).toISOString() });
+    await emitStarted(`Remote · ${creds.host}`);
+    republishSpecs();
   }
 }
 
@@ -716,6 +753,20 @@ export async function restartNode(id: string): Promise<void> {
     title: `Node ${node.moniker} restarted`,
     subtitle: '',
     relatedNodeId: id,
+  });
+
+  // Per-start republish: every restart counts as a fresh on-chain
+  // attestation. Fire-and-forget — already gated through the same
+  // pending/clear lifecycle as startNode.
+  void updateNode(id, { specsPublishPending: true }).then(async () => {
+    try {
+      const { publishNodeSpecs } = await import('./node-specs');
+      const res = await publishNodeSpecs(id, { force: true });
+      if (!res.ok)
+        log.warn('per-restart specs republish failed', { id, err: res.error });
+    } catch (err) {
+      log.warn('per-restart specs republish threw', { id, err: (err as Error).message });
+    }
   });
 }
 
@@ -1062,13 +1113,26 @@ export function startPoller(): void {
             relatedNodeId: node.id,
           });
         } else if (!status.reachable && node.status === 'online') {
-          await transition(node.id, 'offline');
-          await addEvent({
-            kind: 'node-unreachable',
-            title: `Node ${node.moniker} is unreachable`,
-            subtitle: status.error ?? 'No on-chain status',
-            relatedNodeId: node.id,
-          });
+          // Post-start grace: a freshly-started node won't appear on-chain
+          // for ~30–90s while the registration tx propagates and indexers
+          // catch up. Without this gate the very next poll fires a spurious
+          // `node-unreachable` event on top of the user's `node-started`.
+          const sinceStart = Date.now() - (startedAt.get(node.id) ?? 0);
+          const POST_START_UNREACHABLE_GRACE_MS = 90_000;
+          if (sinceStart < POST_START_UNREACHABLE_GRACE_MS) {
+            log.debug('skip unreachable transition within post-start grace', {
+              id: node.id,
+              sinceStartMs: sinceStart,
+            });
+          } else {
+            await transition(node.id, 'offline');
+            await addEvent({
+              kind: 'node-unreachable',
+              title: `Node ${node.moniker} is unreachable`,
+              subtitle: status.error ?? 'No on-chain status',
+              relatedNodeId: node.id,
+            });
+          }
         }
       } catch (err) {
         log.debug('poll node failed', { id: node.id, err: (err as Error).message });

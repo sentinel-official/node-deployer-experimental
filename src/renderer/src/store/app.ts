@@ -7,6 +7,7 @@ import type {
   CliStreamEvent,
   DeployProgress,
   DeployedNode,
+  EventKind,
   LiveSystemStats,
   MetricsSample,
   MetricsWindow,
@@ -27,7 +28,8 @@ export type Route =
   | { name: 'settings' }
   | { name: 'manage-docker' }
   | { name: 'cli' }
-  | { name: 'activity' }
+  | { name: 'activity'; kinds?: EventKind[]; nodeId?: string }
+  | { name: 'on-chain-specs' }
   | { name: 'system' }
   | { name: 'help' };
 
@@ -201,6 +203,12 @@ interface AppState {
 
 const genId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
+// Specs-reported toast bookkeeping (module scope so it survives store
+// re-reads). First refresh seeds the seen-set to suppress the toast for
+// pre-existing events; later refreshes toast on any new id.
+const seenSpecsEventIds = new Set<string>();
+let specsToastSeed = true;
+
 export const useApp = create<AppState>((set, get) => ({
   route: { name: 'wallet-setup' },
   history: [],
@@ -280,7 +288,26 @@ export const useApp = create<AppState>((set, get) => ({
   events: [],
   refreshEvents: async () => {
     try {
-      set({ events: await window.api.events.list(50) });
+      const next = await window.api.events.list(50);
+      const prev = get().events;
+      set({ events: next });
+      if (specsToastSeed) {
+        // First refresh — seed without toasting so existing events don't fire.
+        for (const e of next) if (e.kind === 'specs-reported') seenSpecsEventIds.add(e.id);
+        specsToastSeed = false;
+        return;
+      }
+      const prevIds = new Set(prev.map((e) => e.id));
+      for (const e of next) {
+        if (e.kind !== 'specs-reported') continue;
+        if (prevIds.has(e.id) || seenSpecsEventIds.has(e.id)) continue;
+        seenSpecsEventIds.add(e.id);
+        get().pushToast({
+          title: 'Hardware Specs posted On-Chain',
+          body: e.subtitle ?? e.title,
+          tone: 'success',
+        });
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[refreshEvents]', e);
@@ -484,20 +511,29 @@ export const useApp = create<AppState>((set, get) => ({
         route: hasWallet ? { name: 'overview' } : { name: 'wallet-setup' },
       });
 
+      // Per-jobId one-shot redirect + toast tracking. Without these the
+      // subscriber re-fires on every `done` frame the main process
+      // re-broadcasts (it caches the last frame and replays on resubscribe),
+      // which yanks the user back to the Progress page after they've moved on
+      // to Node Details. One terminal frame, one redirect, one toast.
+      const handledDoneJobs = new Set<string>();
+      const handledErrorJobs = new Set<string>();
       subscriptions.push(
         window.api.deploy.onProgress((p) => {
           get().setProgress(p);
           if (p.log) get().appendDeployLog(p.jobId, p.log);
           if (p.phase === 'done') {
+            if (handledDoneJobs.has(p.jobId)) return;
+            handledDoneJobs.add(p.jobId);
             get().pushToast({
               title: 'Node deployed',
               body: `${p.message} · ${p.operatorAddress?.slice(0, 12) ?? ''}…`,
               tone: 'success',
             });
-            // The recovery phrase ships with the terminal frame and is shown
-            // only on the Progress screen. If the user navigated away mid-
-            // deploy, force them back so they can save the mnemonic before
-            // it's gone for good.
+            // Recovery phrase ships with the terminal frame and is shown
+            // only on the Progress screen. If the user navigated away
+            // mid-deploy, force them back ONCE so they can save the
+            // mnemonic. Subsequent frames for the same job are ignored.
             const ackd = get().seedAck[p.jobId];
             if (p.mnemonicForBackup && !ackd) {
               const currentRoute = get().route;
@@ -513,10 +549,13 @@ export const useApp = create<AppState>((set, get) => ({
                 });
               }
             }
+            void get().refreshNodes();
           } else if (p.phase === 'error') {
+            if (handledErrorJobs.has(p.jobId)) return;
+            handledErrorJobs.add(p.jobId);
             get().pushToast({ title: 'Deployment failed', body: p.message, tone: 'error' });
+            void get().refreshNodes();
           }
-          if (p.phase === 'done' || p.phase === 'error') void get().refreshNodes();
         }),
       );
 

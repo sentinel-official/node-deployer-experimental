@@ -171,12 +171,15 @@ export function buildSpecsMemo(snapshot: NodeSpecsSnapshot): string {
  */
 export async function publishNodeSpecs(
   nodeId: string,
+  opts: { force?: boolean } = {},
 ): Promise<{ ok: boolean; txHash?: string; error?: string }> {
   const node = await getNode(nodeId);
   if (!node) return { ok: false, error: 'Node not found' };
 
-  // Idempotency: if we already have a tx hash on this node, don't re-broadcast.
-  if (node.specsTxHash) {
+  // Default: idempotent — if we already have a tx hash on this node, don't
+  // re-broadcast. `force: true` is used by the per-start republish path so
+  // every on/off cycle gets a fresh on-chain attestation.
+  if (!opts.force && node.specsTxHash) {
     return { ok: true, txHash: node.specsTxHash };
   }
 
@@ -307,7 +310,14 @@ export async function publishNodeSpecs(
     if (!result || result.code !== 0) {
       // Mark for replay — startup poller will try again next session.
       await updateNode(nodeId, { specsPublishPending: true });
-      return { ok: false, error: lastErr || 'Broadcast rejected' };
+      const errMsg = lastErr || 'Broadcast rejected';
+      await addEvent({
+        kind: 'specs-publish-failed',
+        title: `Specs publish failed: ${node.moniker}`,
+        subtitle: errMsg.slice(0, 180),
+        relatedNodeId: nodeId,
+      });
+      return { ok: false, error: errMsg };
     }
 
     const txHash = result.transactionHash;
@@ -326,7 +336,14 @@ export async function publishNodeSpecs(
     return { ok: true, txHash };
   } catch (err) {
     await updateNode(nodeId, { specsPublishPending: true });
-    return { ok: false, error: (err as Error).message };
+    const errMsg = (err as Error).message;
+    await addEvent({
+      kind: 'specs-publish-failed',
+      title: `Specs publish failed: ${node.moniker}`,
+      subtitle: errMsg.slice(0, 180),
+      relatedNodeId: nodeId,
+    });
+    return { ok: false, error: errMsg };
   }
 }
 
@@ -337,14 +354,20 @@ export async function publishNodeSpecs(
  */
 export async function replayPendingSpecs(): Promise<void> {
   const store = await readStore();
+  // A node is "pending" if specsPublishPending is true — regardless of
+  // whether it already has a prior specsTxHash. The per-start republish
+  // path sets pending=true on every start; if that broadcast failed we
+  // need to retry on next launch even though an older tx hash is still
+  // recorded from a previous start. Use force=true so the idempotency
+  // short-circuit in publishNodeSpecs doesn't no-op us.
   const candidates: DeployedNode[] = store.nodes.filter(
-    (n) => n.specsPublishPending && !n.specsTxHash,
+    (n) => n.specsPublishPending,
   );
   if (candidates.length === 0) return;
   log.info('replaying pending specs publishes', { count: candidates.length });
   for (const node of candidates) {
     try {
-      const res = await publishNodeSpecs(node.id);
+      const res = await publishNodeSpecs(node.id, { force: true });
       if (!res.ok) {
         log.warn('specs replay still pending', { nodeId: node.id, err: res.error?.slice(0, 160) });
       }

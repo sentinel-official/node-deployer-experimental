@@ -248,6 +248,29 @@ This entry covers the work on `feat/ui-overhaul` since commit
 - Per-area child loggers (`log.child({ area: 'deploy' })`) so grep'ing
   `app.log` for a single subsystem is straightforward.
 
+### CLI parity (renderer ↔ main registries)
+
+- `ssh.forgetHostKey --host <host> [--port 22]` — drop a TOFU-pinned SSH
+  host key so the next connection re-pins it. Useful after a remote box
+  is rebuilt and presents a new fingerprint. Already existed in the
+  main-process pipe registry; now also exposed via
+  `window.api.ssh.forgetHostKey()` and the renderer CLI registry so the
+  two surfaces stay in lockstep.
+- `nodes.publishSpecs <nodeId>` — publish the on-chain hardware specs
+  report (`specs:v1` self-MsgSend memo) on demand. Idempotent: if the
+  node's `specsTxHash` is already set, returns the cached hash without
+  spending; otherwise broadcasts the same path the deploy hook uses.
+  Added to BOTH registries and to `window.api.nodes.publishSpecs()`.
+- IPC handlers in `src/main/ipc.ts` validate the new payloads
+  (`vUUID(nodeId)` for publishSpecs, host/port shape check for
+  forgetHostKey) and rate-limit `nodes-publish-specs` at 3 burst /
+  0.2 rps so a buggy caller can't loop self-MsgSends.
+- `docs/e2e-cli-test.md` updated: `nodes.publishSpecs` added to phase 5
+  (Inspect) — second run must return the cached hash without spending —
+  and `ssh.forgetHostKey` documented in the validation contract row.
+  Cost section bumped to "at most three transactions" with the
+  idempotency note.
+
 ### Type system
 
 - `src/shared/types.ts` — new types: `LiveSystemStats`,
@@ -255,7 +278,8 @@ This entry covers the work on `feat/ui-overhaul` since commit
   `EventKind` extended with `'specs-reported'`. New IPC channels:
   `SYSTEM_LIVE_STATS_START`, `SYSTEM_LIVE_STATS_STOP`,
   `SYSTEM_LIVE_STATS`, `DOCKER_OPEN_SETTINGS`, `NODES_REAP_STUCK`,
-  `NODES_LIVE_STATUS`, `NODES_EXPORT_MNEMONIC`.
+  `NODES_LIVE_STATUS`, `NODES_EXPORT_MNEMONIC`,
+  `SSH_FORGET_HOST_KEY`, `NODES_PUBLISH_SPECS`.
 - All new IPC referenced via the `IPC` enum; no raw-string channels
   introduced (per project rule).
 

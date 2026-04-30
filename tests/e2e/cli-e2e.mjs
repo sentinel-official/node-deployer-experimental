@@ -15,11 +15,15 @@
  *   - 60 s suite gap between sectioned phases (only if a section broadcast
  *     a tx and the next section will broadcast another).
  *
- * Cost (real money). The test broadcasts at most TWO transactions:
+ * Cost (real money). The test broadcasts at most THREE transactions:
  *   1. wallet.send  — self-send 0.001 DVPN, paid fee ~0.000200 DVPN.
  *   2. nodes.updatePricing — MsgUpdateNodeDetails on the freshly deployed
  *      node, paid fee ~0.000300 DVPN.
- * Total upper bound: ~0.0015 DVPN (≈ a fraction of a cent at typical
+ *   3. nodes.publishSpecs — specs:v1 self-MsgSend on the freshly deployed
+ *      node, paid fee ~0.000200 DVPN at gas 250000. Idempotent: only
+ *      broadcasts once per node (the second call inside phase 5 verifies
+ *      the cached hash is returned without spending).
+ * Total upper bound: ~0.0025 DVPN (≈ a fraction of a cent at typical
  * DVPN price). The wallet must have at least 0.5 DVPN free before this
  * harness will broadcast anything.
  *
@@ -799,6 +803,41 @@ async function phase5_inspect(client, deploy) {
   const lg = await runCmd(client, `nodes.logs ${deploy.nodeId}`);
   if (lg.ok) ok('nodes.logs');
   else fail('nodes.logs', lg.error);
+
+  // nodes.publishSpecs — specs:v1 self-MsgSend memo. Triggered automatically
+  // post-deploy; calling it explicitly here both proves the CLI surface
+  // works AND asserts the idempotency contract (second call must return the
+  // cached txHash without spending again).
+  if (DRY_RUN) {
+    ok('nodes.publishSpecs (SKIPPED, dry-run)');
+    return;
+  }
+  await sleep(TX_GAP_MS);
+  const ps1 = await runCmd(client, `nodes.publishSpecs ${deploy.nodeId}`);
+  if (!ps1.ok) {
+    fail('nodes.publishSpecs', ps1.error);
+    return;
+  }
+  const out1 = parseJSON(ps1.text);
+  const hash1 = out1?.txHash;
+  if (!hash1) {
+    fail('nodes.publishSpecs', `no txHash in result: ${JSON.stringify(out1)}`);
+    return;
+  }
+  ok('nodes.publishSpecs', `hash ${hash1.slice(0, 12)}…`);
+
+  // Idempotency assertion: re-running must return the SAME hash without a
+  // fresh broadcast. The auto-publish hook in deploy.ts may already have
+  // populated specsTxHash, in which case ps1 itself was a cache hit — the
+  // second call still has to match.
+  const ps2 = await runCmd(client, `nodes.publishSpecs ${deploy.nodeId}`);
+  if (!ps2.ok) {
+    fail('nodes.publishSpecs (idempotency)', ps2.error);
+    return;
+  }
+  const hash2 = parseJSON(ps2.text)?.txHash;
+  if (hash2 === hash1) ok('nodes.publishSpecs idempotent', `same hash on re-run`);
+  else fail('nodes.publishSpecs idempotent', `hash drift: ${hash1} → ${hash2}`);
 }
 
 async function phase6_pricingTx(client, deploy) {

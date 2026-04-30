@@ -215,7 +215,7 @@ export function Settings() {
           </div>
         </div>
 
-        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0 gap-3">
+        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0 gap-3 overflow-auto">
           <div className="card">
             <div className="card-header">
               <div className="card-title">Docker</div>

@@ -203,8 +203,8 @@ async function persistMnemonic(
  * Wipe the app wallet: delete the encrypted mnemonic file and clear the
  * persisted wallet record. Per-node operator mnemonics (separate files
  * keyed by node id) are NOT touched — those still exist if you reimport
- * the same recovery phrase. The renderer should treat a successful return
- * as "back to WalletSetup".
+ * the same recovery phrase. Running nodes keep running. The renderer
+ * should treat a successful return as "back to WalletSetup".
  */
 export async function logoutWallet(): Promise<void> {
   try {

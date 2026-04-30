@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
@@ -16,6 +16,7 @@ const KIND_GROUPS: { id: string; label: string; kinds: EventKind[] }[] = [
     id: 'node',
     label: 'Node lifecycle',
     kinds: [
+      'node-started',
       'node-stopped',
       'node-restarted',
       'node-removed',
@@ -23,6 +24,7 @@ const KIND_GROUPS: { id: string; label: string; kinds: EventKind[] }[] = [
       'node-unreachable',
       'node-registered',
       'specs-reported',
+      'specs-publish-failed',
     ],
   },
   {
@@ -44,6 +46,7 @@ const KIND_LABEL: Record<EventKind, string> = {
   'deploy-started': 'Deploy started',
   'deploy-succeeded': 'Deploy succeeded',
   'deploy-failed': 'Deploy failed',
+  'node-started': 'Node started',
   'node-stopped': 'Node stopped',
   'node-restarted': 'Node restarted',
   'node-removed': 'Node removed',
@@ -51,6 +54,7 @@ const KIND_LABEL: Record<EventKind, string> = {
   'node-online': 'Node online',
   'node-registered': 'Node registered',
   'specs-reported': 'Specs reporting',
+  'specs-publish-failed': 'Specs publish failed',
   'withdraw-sent': 'Withdraw sent',
   'withdraw-failed': 'Withdraw failed',
   'balance-refreshed': 'Balance refreshed',
@@ -64,30 +68,46 @@ const TONE_COLOR: Record<'ok' | 'err' | 'warn' | 'accent', string> = {
 };
 
 export function Activity() {
-  const { nodes, navigate } = useApp();
+  const { nodes, navigate, route } = useApp();
+  const initial =
+    route.name === 'activity'
+      ? { kinds: route.kinds, nodeId: route.nodeId }
+      : { kinds: undefined, nodeId: undefined };
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
-  const [nodeId, setNodeId] = useState<'all' | string>('all');
+  const [nodeId, setNodeId] = useState<'all' | string>(initial.nodeId ?? 'all');
   const [enabledKinds, setEnabledKinds] = useState<Set<EventKind>>(
-    () => new Set(KIND_GROUPS.flatMap((g) => g.kinds)),
+    () =>
+      new Set(
+        initial.kinds && initial.kinds.length > 0
+          ? initial.kinds
+          : KIND_GROUPS.flatMap((g) => g.kinds),
+      ),
   );
 
-  const load = async () => {
-    setLoading(true);
+  const firstLoadRef = useRef(true);
+  const cancelledRef = useRef(false);
+  const load = useCallback(async () => {
+    if (firstLoadRef.current) setLoading(true);
     try {
-      setEvents(await window.api.events.list(500));
+      const next = await window.api.events.list(500);
+      if (!cancelledRef.current) setEvents(next);
     } finally {
-      setLoading(false);
+      if (firstLoadRef.current && !cancelledRef.current) setLoading(false);
+      firstLoadRef.current = false;
     }
-  };
+  }, []);
 
   useEffect(() => {
+    cancelledRef.current = false;
     void load();
     const off = window.api.events.onChanged(() => void load());
-    return () => off();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      cancelledRef.current = true;
+      off();
+    };
+  }, [load]);
 
   const nodeNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -243,6 +263,134 @@ export function Activity() {
                 (created, restored, balance) are not node-scoped.
               </div>
             </div>
+
+            {(() => {
+              const hasSpecsEvent = events.some((e) => e.kind === 'specs-reported');
+              const publishPending = nodes.some((n) => n.specsPublishPending);
+              const onlySpecs =
+                enabledKinds.size === 1 && enabledKinds.has('specs-reported');
+              const disabled = !hasSpecsEvent;
+              const showSpinner = publishPending && !hasSpecsEvent;
+              const toggle = () => {
+                if (disabled) return;
+                if (onlySpecs) setEnabledKinds(new Set(allKinds));
+                else setEnabledKinds(new Set(['specs-reported']));
+              };
+              return (
+                <button
+                  type="button"
+                  onClick={toggle}
+                  disabled={disabled}
+                  aria-disabled={disabled}
+                  className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors"
+                  style={{
+                    background: disabled
+                      ? 'var(--bg-input)'
+                      : onlySpecs
+                        ? 'color-mix(in srgb, var(--accent) 18%, transparent)'
+                        : 'color-mix(in srgb, var(--accent) 10%, transparent)',
+                    border: disabled
+                      ? '1px solid var(--border)'
+                      : `1px solid color-mix(in srgb, var(--accent) ${onlySpecs ? 55 : 38}%, transparent)`,
+                    borderRadius: 'var(--radius-md)',
+                    color: 'var(--text)',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.7 : 1,
+                  }}
+                  title={
+                    showSpinner
+                      ? 'Broadcasting specs:v1 memo — this toggle will unlock the moment the tx lands.'
+                      : disabled
+                        ? 'No on-chain specs reporting yet — deploy a node so the app broadcasts a specs:v1 memo, then this toggle unlocks.'
+                        : onlySpecs
+                          ? 'Click to restore all transaction-type filters'
+                          : 'Show only on-chain specs reporting events (specs:v1 self-MsgSend memos)'
+                  }
+                >
+                  <span className="flex items-center gap-2 min-w-0">
+                    {showSpinner ? (
+                      <span
+                        aria-hidden
+                        className="ring-spin"
+                        style={{
+                          width: 14,
+                          height: 14,
+                          borderRadius: '50%',
+                          border: '2px solid var(--border)',
+                          borderTopColor: 'var(--accent)',
+                          flexShrink: 0,
+                        }}
+                      />
+                    ) : (
+                      <MIcon name={disabled ? 'lock' : 'memory'} size={14} />
+                    )}
+                    <span className="flex flex-col items-start min-w-0">
+                      <span
+                        className="text-[11px] uppercase tracking-wider font-semibold"
+                        style={{
+                          color:
+                            showSpinner || !disabled ? 'var(--accent)' : 'var(--text-muted)',
+                        }}
+                      >
+                        View Specs Reporting
+                      </span>
+                      <span
+                        className="text-[11px] leading-snug"
+                        style={{ color: 'var(--text-muted)' }}
+                      >
+                        {showSpinner
+                          ? 'Posting on-chain…'
+                          : disabled
+                            ? 'Unlocks after the first specs:v1 broadcast'
+                            : 'On-chain specs:v1 memos only'}
+                      </span>
+                    </span>
+                  </span>
+                  {showSpinner ? (
+                    <span
+                      className="text-[10px] uppercase tracking-wider font-semibold flex-shrink-0"
+                      style={{ color: 'var(--accent)' }}
+                    >
+                      Posting
+                    </span>
+                  ) : disabled ? (
+                    <span
+                      className="text-[10px] uppercase tracking-wider font-semibold flex-shrink-0"
+                      style={{ color: 'var(--text-dim)' }}
+                    >
+                      Locked
+                    </span>
+                  ) : (
+                    <span
+                      className="grid place-items-center flex-shrink-0"
+                      aria-hidden
+                      style={{
+                        width: 30,
+                        height: 18,
+                        borderRadius: 999,
+                        background: onlySpecs ? 'var(--accent)' : 'var(--bg-input)',
+                        border: `1px solid ${onlySpecs ? 'var(--accent)' : 'var(--border)'}`,
+                        transition: 'background 120ms, border-color 120ms',
+                        position: 'relative',
+                      }}
+                    >
+                      <span
+                        style={{
+                          position: 'absolute',
+                          top: 1,
+                          left: onlySpecs ? 13 : 1,
+                          width: 14,
+                          height: 14,
+                          borderRadius: '50%',
+                          background: onlySpecs ? 'var(--bg)' : 'var(--text-dim)',
+                          transition: 'left 120ms',
+                        }}
+                      />
+                    </span>
+                  )}
+                </button>
+              );
+            })()}
 
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between">

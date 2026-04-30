@@ -59,9 +59,11 @@ export function Nodes() {
     [claimable],
   );
 
+  const nodeIdsKey = useMemo(() => nodes.map((n) => n.id).sort().join(','), [nodes]);
   useEffect(() => {
-    for (const n of nodes) void refreshStatus(n.id);
-  }, [nodes, refreshStatus]);
+    for (const id of nodeIdsKey.split(',').filter(Boolean)) void refreshStatus(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodeIdsKey]);
 
   const stoppable = useMemo(
     () => nodes.filter((n) => n.status === 'offline' || n.status === 'error'),

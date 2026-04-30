@@ -400,6 +400,22 @@ export const COMMANDS: CliCommand[] = [
       return window.api.ssh.test(creds);
     },
   },
+  {
+    name: 'ssh.forgetHostKey',
+    group: 'ssh',
+    summary:
+      'Drop a TOFU-pinned SSH host key so the next connection re-pins it. Use after a server rebuild changes its key fingerprint.',
+    usage: 'ssh.forgetHostKey --host 1.2.3.4 [--port 22]',
+    args: [
+      { name: 'host', kind: 'flag', required: true, describe: 'IP or hostname.' },
+      { name: 'port', kind: 'flag', describe: 'SSH port (default 22).' },
+    ],
+    exec: (p) =>
+      window.api.ssh.forgetHostKey({
+        host: requireFlag(p, 'host'),
+        port: numberFlag(p, 'port') ?? 22,
+      }),
+  },
 
   // ─── deploy ──────────────────────────────────────────────────────────────
   {
@@ -633,6 +649,26 @@ export const COMMANDS: CliCommand[] = [
       };
       return window.api.nodes.updatePricing(req);
     },
+  },
+  {
+    name: 'nodes.publishSpecs',
+    group: 'nodes',
+    summary:
+      'Publish on-chain hardware specs (specs:v1 self-MsgSend memo). Idempotent by default — pass --force to bypass and post a fresh attestation.',
+    usage: 'nodes.publishSpecs <nodeId> [--force]',
+    args: [
+      { name: 'nodeId', kind: 'positional', required: true, describe: 'Node id.' },
+      {
+        name: 'force',
+        kind: 'flag',
+        required: false,
+        describe: 'Bypass the idempotency short-circuit and post a fresh on-chain attestation.',
+      },
+    ],
+    exec: (p) =>
+      window.api.nodes.publishSpecs(requirePositional(p, 0, 'nodeId'), {
+        force: p.flags.force === true || p.flags.force === 'true',
+      }),
   },
   {
     name: 'nodes.backupMnemonic',
