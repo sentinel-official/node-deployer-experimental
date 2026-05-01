@@ -392,13 +392,13 @@ export function Wallet() {
         </div>
       </div>
 
-      <div className="card flex flex-col min-h-0 flex-1 overflow-hidden">
+      <div className="card flex flex-col">
         <div className="card-header">
           <div className="card-title">Wallet activity</div>
           <span className="mono-tag">{walletHistory.length} events</span>
         </div>
         {walletHistory.length === 0 ? (
-          <div className="card-body flex-1 min-h-0 overflow-auto">
+          <div className="card-body">
             <div className="empty-state">
               <MIcon name="inbox" size={28} />
               <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
@@ -407,7 +407,7 @@ export function Wallet() {
             </div>
           </div>
         ) : (
-          <div className="flex-1 min-h-0 overflow-auto">
+          <div>
             {walletHistory.slice(0, 100).map((e, idx) => {
               const Icon = KIND_ICON[e.kind];
               return (

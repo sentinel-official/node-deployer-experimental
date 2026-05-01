@@ -68,10 +68,26 @@ background. The Help screen shows status and can install on demand.
 
 ## For developers
 
+### Toolchain prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Node.js | 20.10+ (LTS) | `engines.node` enforces. `.nvmrc` pins 20 — `nvm use` picks it up. |
+| npm | 10+ | Ships with Node 20. |
+| Python | 3.8+ | `node-gyp` requires it for native module rebuilds. |
+| C/C++ toolchain | platform-specific | Required to compile `better-sqlite3`, `secp256k1`, `cpu-features` against the Electron ABI. |
+
+**Per-OS native-build deps:**
+
+- **Windows**: Visual Studio Build Tools 2022 with the *Desktop development with C++* workload (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --quiet --wait --norestart --includeRecommended"`). Reboot after install.
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`).
+- **Linux**: `sudo apt install build-essential python3 libsecret-1-dev` (Debian / Ubuntu) — `libsecret` is needed by Electron's `safeStorage` keyring backend.
+
+### Run
+
 ```bash
 npm install
-npm run rebuild:node    # rebuild better-sqlite3 against system Node for tests
-npm run dev             # Electron + Vite, with HMR and Docker-aware deploy flow
+npm run dev             # Electron + Vite, HMR, Docker-aware deploy flow
 npm run typecheck       # tsc --noEmit on main + renderer
 npm run test            # vitest: 25 unit + component smoke tests
 
@@ -80,10 +96,13 @@ npm run package:win
 npm run package:linux
 ```
 
-Note: `predev` runs `electron-builder install-app-deps` which rebuilds
-native modules (`better-sqlite3`, `secp256k1`, `cpu-features`) against the
-Electron ABI. If you later want to run unit tests, run
-`npm run rebuild:node` to rebuild for the system Node ABI.
+`npm install` triggers `predev` → `electron-builder install-app-deps`, which
+rebuilds native modules (`better-sqlite3`, `secp256k1`, `cpu-features`)
+against the Electron ABI used by `npm run dev`.
+
+If you ran `npm run test` (which uses system Node) and then want to go back
+to `npm run dev` (Electron), run `npm run rebuild:electron` to flip the ABI
+back. The reverse — Electron → Node — is `npm run rebuild:node`.
 
 ### End-to-end CLI test (real money)
 

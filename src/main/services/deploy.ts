@@ -331,36 +331,43 @@ export async function startDeploy(
       // is fire-and-forget so a transient RPC outage doesn't make `deploy`
       // look like it failed. The startup replay path picks up anything that
       // didn't make it through.
-      void updateNode(nodeId, { specsPublishPending: true });
-      void (async () => {
-        try {
-          // Give the new operator account time for the seed-funding tx to
-          // fully propagate across the RPC pool. 5s was too short — many
-          // RPCs still returned `account does not exist` and bailed. 12s
-          // catches the slowest peers; the fresh-account error is also
-          // now in TRANSIENT_ERR so any residual lag retries cleanly.
-          await new Promise((r) => setTimeout(r, 12_000));
-          push(
-            'done',
-            100,
-            'Node is online',
-            `[${ts()}] Publishing hardware specs on-chain (specs:v1)…`,
-          );
-          const specsRes = await publishNodeSpecs(nodeId, { force: true });
-          if (specsRes.ok) {
+      //
+      // Only remote deploys publish from here. Local deploys go through
+      // startNode at the verified-container-up gate, which already triggers
+      // republishSpecs(); double-publishing would race the same tx into the
+      // mempool and trip the "tx already exists in cache" path.
+      if (req.target === 'remote') {
+        void updateNode(nodeId, { specsPublishPending: true });
+        void (async () => {
+          try {
+            // Give the new operator account time for the seed-funding tx to
+            // fully propagate across the RPC pool. 5s was too short — many
+            // RPCs still returned `account does not exist` and bailed. 12s
+            // catches the slowest peers; the fresh-account error is also
+            // now in TRANSIENT_ERR so any residual lag retries cleanly.
+            await new Promise((r) => setTimeout(r, 12_000));
             push(
               'done',
               100,
               'Node is online',
-              `[${ts()}] Specs reported on-chain · tx ${specsRes.txHash?.slice(0, 16)}…`,
+              `[${ts()}] Publishing hardware specs on-chain (specs:v1)…`,
             );
-          } else {
-            log.warn('specs publish skipped', { nodeId, err: specsRes.error });
+            const specsRes = await publishNodeSpecs(nodeId, { force: true });
+            if (specsRes.ok) {
+              push(
+                'done',
+                100,
+                'Node is online',
+                `[${ts()}] Specs reported on-chain · tx ${specsRes.txHash?.slice(0, 16)}…`,
+              );
+            } else {
+              log.warn('specs publish skipped', { nodeId, err: specsRes.error });
+            }
+          } catch (specsErr) {
+            log.warn('specs publish threw', { nodeId, err: (specsErr as Error).message });
           }
-        } catch (specsErr) {
-          log.warn('specs publish threw', { nodeId, err: (specsErr as Error).message });
-        }
-      })();
+        })();
+      }
     } catch (err) {
       const msg = (err as Error).message ?? 'Unknown error';
       log.error('deploy failed', { id: nodeId, err: msg });

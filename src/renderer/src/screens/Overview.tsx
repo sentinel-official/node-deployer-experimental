@@ -59,7 +59,7 @@ export function Overview() {
   const hasNodes = nodes.length > 0;
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-4 overflow-y-auto">
+    <div className="flex flex-col gap-4">
       {/* Hero */}
       <div
         className="relative"

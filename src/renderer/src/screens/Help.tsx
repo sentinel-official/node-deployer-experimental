@@ -245,7 +245,7 @@ export function Help() {
   };
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    <div className="flex flex-col gap-3" style={{ height: 'calc(100vh - 96px)' }}>
       <PageHeader
         title="Help"
         subtitle="Guides, shortcuts, and diagnostics for running a Sentinel dVPN node."
@@ -276,7 +276,7 @@ export function Help() {
 
       <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
         {/* Left rail */}
-        <aside className="col-span-12 md:col-span-3 lg:col-span-3 flex flex-col gap-3 min-h-0">
+        <aside className="col-span-12 md:col-span-3 lg:col-span-3 flex flex-col gap-3 overflow-auto min-h-0">
           <div className="card">
             <div className="card-body p-2.5 flex flex-col gap-1">
               <div
@@ -393,7 +393,8 @@ export function Help() {
         {/* Main content */}
         <div
           ref={scrollRef}
-          className="col-span-12 md:col-span-9 lg:col-span-9 overflow-auto pr-1 flex flex-col gap-4"
+          className="col-span-12 md:col-span-9 lg:col-span-9 flex flex-col gap-4 overflow-auto min-h-0"
+          style={{ paddingRight: 4 }}
         >
           {filteredSections.length === 0 && (
             <div className="card">

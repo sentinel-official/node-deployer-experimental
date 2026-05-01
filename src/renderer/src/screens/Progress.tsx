@@ -113,7 +113,7 @@ export function Progress({ jobId, moniker, origin }: Props) {
           : 'In progress';
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-4 overflow-y-auto">
+    <div className="flex flex-col gap-4">
       <PageHeader
         breadcrumb={
           <>
@@ -229,7 +229,30 @@ export function Progress({ jobId, moniker, origin }: Props) {
         </div>
       )}
 
-      <div className="grid grid-cols-12 gap-4 flex-1 min-h-0">
+      {phase === 'image-build' && (
+        <div
+          className="flex items-start gap-3 px-4 py-3"
+          style={{
+            background: 'color-mix(in srgb, var(--accent) 9%, transparent)',
+            border: '1px solid color-mix(in srgb, var(--accent) 30%, transparent)',
+            borderRadius: 'var(--radius-md)',
+          }}
+        >
+          <MIcon name="schedule" size={18} />
+          <div className="flex-1 min-w-0">
+            <div className="text-[13px] font-semibold" style={{ color: 'var(--text)' }}>
+              First build takes 10–15 minutes
+            </div>
+            <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+              Compiling sentinel-dvpnx from source inside Docker. Subsequent
+              deploys reuse the cached image and start in under a minute. Safe
+              to leave the screen — progress is preserved.
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-12 gap-4">
         <div className="card col-span-12 lg:col-span-4 flex flex-col">
           <div className="card-body flex flex-col items-center gap-4">
             <ProgressRing
@@ -296,7 +319,7 @@ export function Progress({ jobId, moniker, origin }: Props) {
             </div>
             <span className="mono-tag">deploy.log</span>
           </div>
-          <div className="flex-1 min-h-0 p-[22px]">
+          <div className="p-[22px]" style={{ height: '60vh', minHeight: 320 }}>
             <pre
               ref={logRef}
               className="h-full w-full overflow-auto text-[12px] leading-[1.65] whitespace-pre-wrap"

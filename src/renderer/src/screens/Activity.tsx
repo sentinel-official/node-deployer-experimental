@@ -193,7 +193,7 @@ export function Activity() {
   const totalAll = events.length;
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    <div className="flex flex-col gap-3">
       <PageHeader
         title="Activity"
         subtitle="Every wallet, deploy, node, and withdraw event from this device. Search by node, filter by transaction type."
@@ -205,9 +205,9 @@ export function Activity() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
+      <div className="grid grid-cols-12 gap-3" style={{ height: 'calc(100vh - 180px)' }}>
         {/* Filters */}
-        <div className="col-span-12 lg:col-span-4 card flex flex-col min-h-0 overflow-hidden">
+        <div className="col-span-12 lg:col-span-4 card flex flex-col overflow-hidden">
           <div className="card-header">
             <div className="card-title flex items-center gap-2">
               <MIcon name="filter_alt" size={14} />
@@ -217,7 +217,7 @@ export function Activity() {
               {totalShown} / {totalAll}
             </div>
           </div>
-          <div className="card-body flex flex-col gap-4 flex-1 min-h-0 overflow-auto">
+          <div className="card-body flex flex-col gap-4 overflow-auto flex-1 min-h-0">
             <div>
               <div className="field-label">Search</div>
               <div className="relative">
@@ -532,7 +532,7 @@ export function Activity() {
         </div>
 
         {/* Feed */}
-        <div className="col-span-12 lg:col-span-8 card flex flex-col min-h-0 overflow-hidden">
+        <div className="col-span-12 lg:col-span-8 card flex flex-col overflow-hidden">
           <div className="card-header">
             <div className="card-title flex items-center gap-2">
               <MIcon name="history" size={14} />
@@ -544,7 +544,7 @@ export function Activity() {
                 : `${totalShown} event${totalShown === 1 ? '' : 's'}`}
             </div>
           </div>
-          <div className="flex-1 min-h-0 overflow-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             {loading && events.length === 0 ? (
               <div className="loading-state">Loading activity…</div>
             ) : totalShown === 0 ? (

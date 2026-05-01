@@ -306,7 +306,7 @@ export function DeploySshBatch() {
   }, [cliOpen]);
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-2 relative">
+    <div className="flex flex-col gap-2 relative">
       <PageHeader
         title="Deploy SSH · Batch"
         subtitle="Provision many SSH targets in one pass. Chain broadcasts run one-at-a-time to keep wallet sequences clean."
@@ -428,8 +428,8 @@ export function DeploySshBatch() {
         </div>
       )}
 
-      {/* DOMINANT: hosts table — fills remaining viewport */}
-      <div className="card flex flex-col overflow-hidden flex-1 min-h-0">
+      {/* DOMINANT: hosts table */}
+      <div className="card flex flex-col overflow-hidden">
         <div className="card-header flex items-center justify-between py-2">
           <div className="card-title flex items-center gap-2">
             <MIcon name="dns" size={14} />
@@ -442,7 +442,7 @@ export function DeploySshBatch() {
             <span><b style={{ color: 'var(--red)' }}>{counts.failed}</b> failed</span>
           </div>
         </div>
-        <div className="flex-1 min-h-0 overflow-auto">
+        <div className="overflow-auto" style={{ maxHeight: 560 }}>
           <div className="grid text-[11px] uppercase tracking-wider px-2 py-1.5 sticky top-0 z-10"
             style={{ gridTemplateColumns: 'minmax(0,1.5fr) 80px minmax(0,0.9fr) minmax(0,1.2fr) 64px minmax(0,1.4fr) 96px 76px 28px', gap: '4px', background: 'var(--bg-input)', color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
             <div className="truncate">Host</div>
@@ -535,6 +535,16 @@ export function DeploySshBatch() {
               </div>
             );
           })}
+          <div className="px-2 py-2 flex justify-center">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={addRow}
+              disabled={running || rows.length >= 50}
+              title="Append another host row"
+            >
+              <MIcon name="add" size={14} /> Add host
+            </button>
+          </div>
         </div>
       </div>
 
@@ -679,7 +689,7 @@ export function DeploySshBatch() {
             <div
               onClick={onClose}
               style={{
-                position: 'absolute',
+                position: 'fixed',
                 inset: 0,
                 background: 'rgba(0,0,0,0.45)',
                 zIndex: 60,
@@ -689,11 +699,13 @@ export function DeploySshBatch() {
               role="dialog"
               aria-label="Per-host credentials"
               style={{
-                position: 'absolute',
+                position: 'fixed',
                 top: '50%',
                 left: '50%',
                 transform: 'translate(-50%, -50%)',
                 width: 'min(440px, 92%)',
+                maxHeight: '90vh',
+                overflowY: 'auto',
                 background: 'var(--bg)',
                 border: '1px solid var(--border)',
                 borderRadius: 'var(--radius-md)',

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { MIcon } from '../components/MIcon';
 import { useApp } from '../store/app';
-import type { AppSettings } from '../../../shared/types';
+import type { AppSettings, ChainHealth } from '../../../shared/types';
 
 export function Settings() {
   const {
@@ -20,6 +20,13 @@ export function Settings() {
     if (!settings) void refreshSettings();
     void refreshChainHealth();
   }, [settings, refreshSettings, refreshChainHealth]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      void refreshChainHealth();
+    }, 60_000);
+    return () => clearInterval(id);
+  }, [refreshChainHealth]);
 
   useEffect(() => setDraft(settings), [settings]);
 
@@ -51,6 +58,12 @@ export function Settings() {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
 
+  const gasPriceValid = /^\d+(\.\d+)?$/.test(draft.gasPriceUdvpn.trim());
+  const trimmedRpc = draft.rpcUrls.map((u) => u.trim()).filter((u) => u.length > 0);
+  const rpcInvalid = trimmedRpc.filter((u) => !/^https?:\/\/[^\s]+$/.test(u));
+  const rpcAllValid = trimmedRpc.length > 0 && rpcInvalid.length === 0;
+  const canSave = dirty && !saving && gasPriceValid && rpcAllValid;
+
   return (
     <div className="flex flex-col h-full min-h-0 gap-3">
       <PageHeader
@@ -65,19 +78,30 @@ export function Settings() {
               <MIcon name="network_check" size={14} />
               Probe RPC pool
             </button>
-            <button className="btn btn-primary" onClick={save} disabled={!dirty || saving}>
+            <button
+              className="btn btn-primary"
+              onClick={save}
+              disabled={!canSave}
+              title={
+                !gasPriceValid
+                  ? 'Gas price must be a positive number (e.g. 0.1)'
+                  : !rpcAllValid
+                  ? 'Every RPC endpoint must be a valid http(s) URL'
+                  : undefined
+              }
+            >
               {saving ? 'Saving…' : 'Save changes'}
             </button>
           </>
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        <div className="col-span-12 lg:col-span-8 card flex flex-col min-h-0 overflow-hidden">
+      <div className="grid grid-cols-12 gap-3">
+        <div className="col-span-12 lg:col-span-8 card flex flex-col">
           <div className="card-header">
             <div className="card-title">Chain</div>
           </div>
-          <div className="card-body flex flex-col gap-3 flex-1 min-h-0 overflow-auto">
+          <div className="card-body flex flex-col gap-3">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
                 <div className="field-label">Chain ID</div>
@@ -93,88 +117,31 @@ export function Settings() {
                   className="field-input mono-inline"
                   value={draft.gasPriceUdvpn}
                   onChange={(e) => update({ gasPriceUdvpn: e.target.value })}
+                  aria-invalid={!gasPriceValid}
+                  style={
+                    gasPriceValid
+                      ? undefined
+                      : { borderColor: 'var(--red)' }
+                  }
                 />
                 <div
                   className="text-[10px] mt-1"
-                  style={{ color: 'var(--text-dim)' }}
+                  style={{ color: gasPriceValid ? 'var(--text-dim)' : 'var(--red)' }}
                 >
-                  1 $P2P equals 1,000,000 udvpn. The network default is{' '}
-                  <span className="mono-inline">0.1udvpn</span> (approximately 0.0000001 $P2P per gas unit).
+                  {gasPriceValid
+                    ? '1 $P2P equals 1,000,000 udvpn. The network default is 0.1 (≈0.0000001 $P2P per gas unit).'
+                    : 'Enter a positive number (e.g. 0.1) — no units, the suffix is added automatically.'}
                 </div>
               </div>
             </div>
-            <div>
-              <div className="field-label">
-                RPC endpoints (one per line; requests use the first reachable endpoint)
-              </div>
-              <textarea
-                rows={3}
-                value={draft.rpcUrls.join('\n')}
-                onChange={(e) => update({ rpcUrls: e.target.value.split(/\r?\n/) })}
-                className="field-input mono-inline text-xs"
-              />
-            </div>
-
-            <div className="flex flex-col min-h-0">
-              <div
-                className="text-[11px] uppercase tracking-wider font-semibold mb-2"
-                style={{ color: 'var(--text-muted)' }}
-              >
-                Pool health
-              </div>
-              {chainHealth.length === 0 ? (
-                <div className="text-xs" style={{ color: 'var(--text-dim)' }}>
-                  Probing…
-                </div>
-              ) : (
-                <ul
-                  className="overflow-hidden"
-                  style={{
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-md)',
-                  }}
-                >
-                  {chainHealth.map((h, idx) => (
-                    <li
-                      key={h.rpcUrl}
-                      className="px-3 py-2 flex items-center gap-3 text-xs"
-                      style={{
-                        borderTop: idx === 0 ? 'none' : '1px solid var(--border)',
-                        background: 'var(--bg-input)',
-                      }}
-                    >
-                      <span
-                        className="h-1.5 w-1.5 rounded-full flex-shrink-0"
-                        style={{
-                          background: h.reachable ? 'var(--green)' : 'var(--red)',
-                        }}
-                      />
-                      <span className="mono-inline truncate min-w-0" style={{ color: 'var(--text)' }}>
-                        {h.rpcUrl}
-                      </span>
-                      <div className="flex-1" />
-                      {h.reachable ? (
-                        <>
-                          <span style={{ color: 'var(--text-muted)' }}>
-                            height {h.blockHeight ?? '—'}
-                          </span>
-                          <span style={{ color: 'var(--text-dim)' }}>
-                            · {h.latencyMs}ms
-                          </span>
-                        </>
-                      ) : (
-                        <span
-                          className="truncate max-w-[280px]"
-                          style={{ color: 'var(--red)' }}
-                        >
-                          {h.error}
-                        </span>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+            <RpcEndpointsTable
+              urls={draft.rpcUrls}
+              onChange={(rpcUrls) => update({ rpcUrls })}
+              chainHealth={chainHealth}
+              rpcAllValid={rpcAllValid}
+              trimmedCount={trimmedRpc.length}
+              invalidUrls={rpcInvalid}
+            />
 
             <div className="flex flex-col">
               <div
@@ -215,7 +182,7 @@ export function Settings() {
           </div>
         </div>
 
-        <div className="col-span-12 lg:col-span-4 flex flex-col min-h-0 gap-3 overflow-auto">
+        <div className="col-span-12 lg:col-span-4 flex flex-col gap-3">
           <div className="card">
             <div className="card-header">
               <div className="card-title">Docker</div>
@@ -300,6 +267,209 @@ export function Settings() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+interface RpcEndpointsTableProps {
+  urls: string[];
+  onChange: (next: string[]) => void;
+  chainHealth: ChainHealth[];
+  rpcAllValid: boolean;
+  trimmedCount: number;
+  invalidUrls: string[];
+}
+
+function RpcEndpointsTable({
+  urls,
+  onChange,
+  chainHealth,
+  rpcAllValid,
+  trimmedCount,
+  invalidUrls,
+}: RpcEndpointsTableProps) {
+  const healthByUrl = new Map(
+    chainHealth.map((h) => [h.rpcUrl.trim(), h]),
+  );
+  const updateUrl = (idx: number, value: string) => {
+    const next = [...urls];
+    next[idx] = value;
+    onChange(next);
+  };
+  const removeUrl = (idx: number) => {
+    if (urls.length <= 1) return;
+    const next = urls.filter((_, i) => i !== idx);
+    onChange(next);
+  };
+  const addUrl = () => onChange([...urls, '']);
+
+  return (
+    <div className="flex flex-col">
+      <div className="field-label">
+        RPC endpoints (one per line; requests use the first reachable endpoint)
+      </div>
+      <div
+        className="card flex flex-col overflow-hidden"
+        style={{
+          border: `1px solid ${rpcAllValid ? 'var(--border)' : 'var(--red)'}`,
+        }}
+      >
+        <div className="card-header flex items-center justify-between py-2">
+          <div className="card-title flex items-center gap-2">
+            <MIcon name="hub" size={14} />
+            Endpoints ({urls.length})
+          </div>
+          <div
+            className="flex items-center gap-3 text-[11px]"
+            style={{ color: 'var(--text-muted)' }}
+          >
+            <span>
+              <b style={{ color: 'var(--green)' }}>
+                {urls.reduce((n, u) => {
+                  const h = healthByUrl.get(u.trim());
+                  return n + (h?.reachable ? 1 : 0);
+                }, 0)}
+              </b>{' '}
+              reachable
+            </span>
+            <span>
+              <b style={{ color: 'var(--red)' }}>
+                {urls.reduce((n, u) => {
+                  const h = healthByUrl.get(u.trim());
+                  return n + (h && !h.reachable ? 1 : 0);
+                }, 0)}
+              </b>{' '}
+              down
+            </span>
+            <span style={{ color: 'var(--text-dim)' }}>
+              {urls.reduce((n, u) => {
+                const t = u.trim();
+                return n + (t && !healthByUrl.has(t) ? 1 : 0);
+              }, 0)}{' '}
+              unprobed
+            </span>
+          </div>
+        </div>
+        <div className="overflow-auto" style={{ maxHeight: 480 }}>
+          <div
+            className="grid text-[11px] uppercase tracking-wider px-2 py-1.5 sticky top-0 z-10"
+            style={{
+              gridTemplateColumns:
+                '20px minmax(0,1fr) minmax(0,160px) 28px',
+              gap: '6px',
+              background: 'var(--bg-input)',
+              color: 'var(--text-muted)',
+              borderBottom: '1px solid var(--border)',
+            }}
+          >
+            <div />
+            <div className="truncate">RPC URL</div>
+            <div className="truncate">Status</div>
+            <div />
+          </div>
+          {urls.map((url, idx) => {
+            const trimmed = url.trim();
+            const valid = trimmed.length === 0 || /^https?:\/\/[^\s]+$/.test(trimmed);
+            const h = healthByUrl.get(trimmed);
+            return (
+              <div
+                key={idx}
+                className="grid items-center px-2 py-1.5"
+                style={{
+                  gridTemplateColumns:
+                    '20px minmax(0,1fr) minmax(0,160px) 28px',
+                  gap: '6px',
+                  borderBottom: '1px solid var(--border)',
+                }}
+              >
+                <span
+                  className="h-2 w-2 rounded-full justify-self-center flex-shrink-0"
+                  style={{
+                    background: !trimmed
+                      ? 'var(--text-dim)'
+                      : !valid
+                        ? 'var(--red)'
+                        : h
+                          ? h.reachable
+                            ? 'var(--green)'
+                            : 'var(--red)'
+                          : 'var(--text-dim)',
+                  }}
+                  title={
+                    !trimmed
+                      ? 'Empty'
+                      : !valid
+                        ? 'Invalid URL'
+                        : h
+                          ? h.reachable
+                            ? 'Reachable'
+                            : `Down: ${h.error ?? 'unknown'}`
+                          : 'Unprobed'
+                  }
+                />
+                <input
+                  className="field-input mono-inline text-xs"
+                  style={{ minWidth: 0 }}
+                  value={url}
+                  onChange={(e) => updateUrl(idx, e.target.value)}
+                  placeholder="https://rpc.example.com:443"
+                  aria-invalid={!valid}
+                />
+                <div
+                  className="text-[11px] truncate"
+                  title={
+                    h?.reachable
+                      ? `height ${h.blockHeight ?? '—'} · ${h.latencyMs}ms`
+                      : h?.error ?? ''
+                  }
+                  style={{
+                    color: h?.reachable
+                      ? 'var(--text-muted)'
+                      : h
+                        ? 'var(--red)'
+                        : 'var(--text-dim)',
+                  }}
+                >
+                  {!trimmed
+                    ? '—'
+                    : h?.reachable
+                      ? `height ${h.blockHeight ?? '—'} · ${h.latencyMs}ms`
+                      : h
+                        ? h.error ?? 'unreachable'
+                        : 'not probed yet'}
+                </div>
+                <button
+                  className="btn btn-ghost btn-sm self-center"
+                  onClick={() => removeUrl(idx)}
+                  disabled={urls.length === 1}
+                  title={urls.length === 1 ? 'At least one endpoint required' : 'Remove'}
+                  style={{ padding: 2 }}
+                >
+                  <MIcon name="close" size={14} />
+                </button>
+              </div>
+            );
+          })}
+          <div className="px-2 py-2 flex justify-center">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={addUrl}
+              title="Append another RPC endpoint"
+            >
+              <MIcon name="add" size={14} /> Add RPC endpoint
+            </button>
+          </div>
+        </div>
+      </div>
+      {!rpcAllValid && (
+        <div className="text-[10px] mt-1" style={{ color: 'var(--red)' }}>
+          {trimmedCount === 0
+            ? 'At least one RPC endpoint is required.'
+            : `Invalid URL${invalidUrls.length > 1 ? 's' : ''}: ${invalidUrls
+                .slice(0, 3)
+                .join(', ')}`}
+        </div>
+      )}
     </div>
   );
 }

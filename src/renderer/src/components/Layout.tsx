@@ -8,22 +8,8 @@ import { Onboarding } from './Onboarding';
 import { SeedPhraseModal } from './SeedPhraseModal';
 import { MIcon } from './MIcon';
 
-const NO_OUTER_SCROLL = new Set<string>([
-  'overview',
-  'progress',
-  'wallet',
-  'deploy-ssh',
-  'deploy-local',
-  'node-details',
-  'settings',
-  'manage-docker',
-  'help',
-  'activity',
-]);
-
 export function Layout({ children }: PropsWithChildren) {
   const route = useApp((s) => s.route);
-  const outerScroll = NO_OUTER_SCROLL.has(route.name) ? 'overflow-hidden' : 'overflow-y-auto';
   return (
     <div className="flex h-full overflow-hidden">
       <Sidebar />
@@ -31,10 +17,10 @@ export function Layout({ children }: PropsWithChildren) {
         <Topbar />
         <main
           key={route.name}
-          className={`flex-1 min-h-0 ${outerScroll} page-transition`}
+          className="flex-1 min-h-0 overflow-y-auto page-transition"
           style={{ padding: '16px 22px' }}
         >
-          <div className="mx-auto max-w-[1280px] h-full min-h-0 flex flex-col">{children}</div>
+          <div className="mx-auto max-w-[1280px] flex flex-col">{children}</div>
         </main>
       </div>
       <ToastStack />

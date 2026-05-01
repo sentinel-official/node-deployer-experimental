@@ -175,11 +175,8 @@ export function ManageDocker() {
         }
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        <div
-          className="col-span-12 lg:col-span-8 flex flex-col gap-3 min-h-0"
-          style={{ overflowY: 'auto' }}
-        >
+      <div className="grid grid-cols-12 gap-3">
+        <div className="col-span-12 lg:col-span-8 flex flex-col gap-3">
           <DaemonCard
             overview={overview}
             loaded={loaded}
@@ -191,10 +188,7 @@ export function ManageDocker() {
           <SentinelImagesCard overview={overview} loaded={loaded} onPrune={onPrune} busy={busy} />
         </div>
 
-        <div
-          className="col-span-12 lg:col-span-4 flex flex-col gap-3 min-h-0"
-          style={{ overflowY: 'auto' }}
-        >
+        <div className="col-span-12 lg:col-span-4 flex flex-col gap-3">
           {loaded && overview?.reachable && (
             <ActionsCard
               overview={overview}
@@ -244,50 +238,146 @@ function DaemonCard({
   // the card height doesn't shift between probe and result.
   const showStats = !loaded || reachable;
 
+  const runtimeBits: string[] = [];
+  if (overview?.os) runtimeBits.push(overview.os);
+  if (overview?.arch) runtimeBits.push(overview.arch);
+  if (overview?.apiVersion) runtimeBits.push(`API ${overview.apiVersion}`);
+
   return (
     <div className="card">
-      <div className="card-header">
+      <div className="card-header flex items-center justify-between">
         <div className="card-title flex items-center gap-2">
           <MIcon name="deployed_code" size={14} />
           Docker daemon
         </div>
-      </div>
-      <div className="card-body flex flex-col gap-3">
-        <div className="flex items-center gap-3">
+        {loaded && reachable && (
           <span
-            className="inline-block rounded-full"
-            style={{ width: 10, height: 10, background: dotColor }}
-          />
+            className="inline-flex items-center gap-1.5 text-[10px]"
+            style={{
+              background: 'color-mix(in srgb, var(--green) 14%, transparent)',
+              border: '1px solid color-mix(in srgb, var(--green) 50%, transparent)',
+              color: 'var(--text)',
+              padding: '2px 8px',
+              borderRadius: 999,
+            }}
+          >
+            <span
+              className="inline-block rounded-full"
+              style={{ width: 6, height: 6, background: 'var(--green)' }}
+            />
+            Connected
+          </span>
+        )}
+      </div>
+      <div className="card-body flex flex-col gap-2">
+        {/* Hero — tinted icon tile + version + runtime line */}
+        <div
+          className="flex items-center gap-2.5 px-2.5 py-2 rounded-md"
+          style={{
+            background: 'var(--bg-input)',
+            border: '1px solid var(--border)',
+          }}
+        >
+          <div
+            className="grid place-items-center rounded-md flex-shrink-0"
+            style={{
+              width: 28,
+              height: 28,
+              background: `color-mix(in srgb, ${dotColor} 18%, transparent)`,
+              color: dotColor,
+            }}
+          >
+            <MIcon name="deployed_code" size={16} />
+          </div>
           <div className="flex-1 min-w-0">
-            <div className="font-semibold text-sm" style={{ color: 'var(--text)' }}>
+            <div
+              className="font-semibold text-[12px] leading-tight truncate"
+              style={{ color: 'var(--text)' }}
+              title={headline}
+            >
               {headline}
             </div>
-            <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-              {sub}
+            <div
+              className="text-[10px] mono-inline truncate"
+              style={{
+                color: loaded && !reachable ? 'var(--red)' : 'var(--text-muted)',
+              }}
+              title={loaded && reachable ? runtimeBits.join(' · ') : sub}
+            >
+              {loaded && reachable
+                ? runtimeBits.join(' · ') || sub
+                : sub}
             </div>
           </div>
         </div>
 
         {showStats ? (
-          <div className="grid grid-cols-4 gap-2">
-            <Stat
-              label="Containers"
-              value={loaded && overview ? String(overview.containers.total) : '—'}
-            />
-            <Stat
-              label="Running"
-              value={loaded && overview ? String(overview.containers.running) : '—'}
-              accent
-            />
-            <Stat
-              label="Images"
-              value={loaded && overview ? String(overview.images.count) : '—'}
-            />
-            <Stat
-              label="Image disk"
-              value={loaded && overview ? fmtBytes(overview.images.sizeBytes) : '—'}
-            />
-          </div>
+          <>
+            {/* Containers section */}
+            <div>
+              <div
+                className="text-[9px] uppercase tracking-wider mb-1"
+                style={{ color: 'var(--text-dim)' }}
+              >
+                Containers
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                <Stat
+                  label="Total"
+                  value={loaded && overview ? String(overview.containers.total) : '—'}
+                />
+                <Stat
+                  label="Running"
+                  value={loaded && overview ? String(overview.containers.running) : '—'}
+                  accent
+                />
+                <Stat
+                  label="Paused"
+                  value={loaded && overview ? String(overview.containers.paused) : '—'}
+                />
+                <Stat
+                  label="Stopped"
+                  value={loaded && overview ? String(overview.containers.stopped) : '—'}
+                />
+              </div>
+            </div>
+
+            {/* Host capacity section */}
+            <div>
+              <div
+                className="text-[9px] uppercase tracking-wider mb-1"
+                style={{ color: 'var(--text-dim)' }}
+              >
+                Host capacity
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                <Stat
+                  label="Images"
+                  value={loaded && overview ? String(overview.images.count) : '—'}
+                />
+                <Stat
+                  label="Disk"
+                  value={loaded && overview ? fmtBytes(overview.images.sizeBytes) : '—'}
+                  help="Total image disk usage."
+                />
+                <Stat
+                  label="vCPUs"
+                  value={loaded && overview?.ncpu ? String(overview.ncpu) : '—'}
+                  help="Logical cores Docker advertises to containers."
+                />
+                <Stat
+                  label="Memory"
+                  value={
+                    loaded && overview?.totalMemoryMb
+                      ? fmtBytes(overview.totalMemoryMb * 1024 * 1024)
+                      : '—'
+                  }
+                  help="Total memory Docker advertises to containers."
+                />
+              </div>
+            </div>
+
+          </>
         ) : (
           <div className="flex flex-wrap gap-2">
             {overview?.desktop?.startable && (
@@ -707,22 +797,22 @@ function Stat({
 }) {
   return (
     <div
-      className="flex flex-col items-center justify-center text-center gap-1 px-3 py-4 rounded"
+      className="flex flex-col items-center justify-center text-center gap-0.5 px-1.5 py-1.5 rounded"
       style={{
         background: 'var(--bg-input)',
         border: '1px solid var(--border)',
-        minHeight: 78,
+        minHeight: 44,
       }}
       title={help}
     >
       <div
-        className="text-[10px] uppercase tracking-wider"
+        className="text-[9px] uppercase tracking-wider"
         style={{ color: 'var(--text-muted)' }}
       >
         {label}
       </div>
       <div
-        className="font-semibold text-lg leading-none tabular-nums"
+        className="font-semibold text-[13px] leading-none tabular-nums truncate max-w-full"
         style={{ color: accent ? 'var(--accent)' : 'var(--text)' }}
       >
         {value}

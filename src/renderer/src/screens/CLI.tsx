@@ -318,7 +318,7 @@ export function CLI() {
         : { color: 'var(--yellow)', dot: 'var(--yellow)' };
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-4">
+    <div className="flex flex-col gap-4" style={{ height: 'calc(100vh - 96px)' }}>
       <PageHeader
         title="CLI"
         subtitle="Every IPC handler the GUI uses, callable from here, PowerShell, or an AI agent."
@@ -397,7 +397,7 @@ export function CLI() {
       <div className="grid grid-cols-12 gap-4 flex-1 min-h-0">
         {/* Reference panel */}
         <div className="col-span-12 lg:col-span-5 flex flex-col min-h-0">
-          <div className="card flex flex-col min-h-0 overflow-hidden flex-1">
+          <div className="card flex flex-col overflow-hidden flex-1 min-h-0">
             <div className="card-header">
               <div className="card-title flex items-center gap-2">
                 <MIcon name="menu_book" size={14} />
@@ -422,7 +422,7 @@ export function CLI() {
                 />
               </div>
             </div>
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div className="overflow-auto flex-1 min-h-0">
               {[...groups.entries()].map(([group, cmds]) => (
                 <div key={group}>
                   <div
@@ -542,7 +542,7 @@ export function CLI() {
 
         {/* Terminal panel */}
         <div className="col-span-12 lg:col-span-7 flex flex-col min-h-0">
-          <div className="card flex flex-col min-h-0 overflow-hidden flex-1">
+          <div className="card flex flex-col overflow-hidden flex-1 min-h-0">
             <div className="card-header">
               <div className="card-title flex items-center gap-2">
                 <MIcon name="terminal" size={14} />
@@ -604,7 +604,7 @@ export function CLI() {
             </div>
             <div
               ref={outRef}
-              className="flex-1 min-h-0 overflow-auto px-4 py-3"
+              className="overflow-auto px-4 py-3 flex-1 min-h-0"
               style={{
                 background: 'var(--bg-input)',
                 fontFamily: 'var(--font-mono)',

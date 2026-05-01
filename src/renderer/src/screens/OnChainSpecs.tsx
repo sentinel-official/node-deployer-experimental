@@ -82,7 +82,7 @@ export function OnChainSpecs() {
   const publishPending = nodes.some((n) => n.specsPublishPending);
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    <div className="flex flex-col gap-3" style={{ height: 'calc(100vh - 96px)' }}>
       <PageHeader
         title="On-Chain Specs Reporting"
         right={
@@ -140,7 +140,7 @@ export function OnChainSpecs() {
       />
 
       <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
-        <div className="col-span-12 lg:col-span-7 flex flex-col gap-3 min-h-0 overflow-auto">
+        <div className="col-span-12 lg:col-span-7 flex flex-col gap-3 overflow-auto min-h-0">
           <ExplainerCard />
           {report ? (
             <>
@@ -156,7 +156,7 @@ export function OnChainSpecs() {
           )}
         </div>
 
-        <div className="col-span-12 lg:col-span-5 card flex flex-col min-h-0 overflow-hidden">
+        <div className="col-span-12 lg:col-span-5 card flex flex-col overflow-hidden">
           <div className="card-header">
             <div className="card-title flex items-center gap-2">
               <MIcon name="history" size={14} />
@@ -168,7 +168,7 @@ export function OnChainSpecs() {
                 : `${specsEvents.length} post${specsEvents.length === 1 ? '' : 's'}`}
             </div>
           </div>
-          <div className="flex-1 min-h-0 overflow-auto">
+          <div className="overflow-auto flex-1 min-h-0">
             {loadingEvents && events.length === 0 ? (
               <div className="loading-state">Loading…</div>
             ) : specsEvents.length === 0 ? (
@@ -534,10 +534,10 @@ function SpecsSnapshotCard({
       <div className="card-header py-2">
         <div className="flex items-center gap-2 min-w-0">
           <MIcon name="memory" size={14} style={{ color: 'var(--accent)' }} />
-          <div className="card-title text-sm">Snapshot for this machine</div>
+          <div className="card-title text-[13.3px]">Snapshot for this machine</div>
         </div>
       </div>
-      <div className="card-body py-3 flex flex-col gap-3">
+      <div className="card-body flex flex-col gap-3" style={{ paddingTop: 15, paddingBottom: 16 }}>
         {/* CPU hero */}
         <div
           className="flex items-center gap-3 rounded-lg px-3 py-2.5"
@@ -561,13 +561,13 @@ function SpecsSnapshotCard({
           </div>
           <div className="flex flex-col min-w-0 leading-tight">
             <span
-              className="text-[10px] uppercase tracking-[0.12em]"
+              className="text-[9.5px] uppercase tracking-[0.12em]"
               style={{ color: 'var(--text-dim)' }}
             >
               Processor
             </span>
             <span
-              className="text-sm font-semibold truncate"
+              className="text-[13.3px] font-semibold truncate"
               style={{ color: 'var(--text)' }}
               title={cpu}
             >
@@ -618,7 +618,7 @@ function SpecsMeter({
         <span className="flex items-center gap-1.5">
           <MIcon name={icon} size={14} style={{ color: 'var(--accent)' }} />
           <span
-            className="text-[11px] uppercase tracking-[0.1em] font-medium"
+            className="text-[10.5px] uppercase tracking-[0.1em] font-medium"
             style={{ color: 'var(--text-muted)' }}
           >
             {label}
@@ -626,13 +626,13 @@ function SpecsMeter({
         </span>
         <div className="flex flex-col items-end leading-tight">
           <span
-            className="text-[9px] uppercase tracking-[0.12em]"
+            className="text-[8.5px] uppercase tracking-[0.12em]"
             style={{ color: 'var(--text-dim)' }}
           >
             Reserved / Total
           </span>
           <span
-            className="text-sm tabular-nums"
+            className="text-[13.3px] tabular-nums"
             style={{ color: 'var(--text-muted)' }}
           >
             <span className="font-semibold" style={{ color: 'var(--text)' }}>
@@ -688,23 +688,13 @@ function SpecsMemoCard({
       <div className="card-header py-2">
         <div className="flex items-center gap-2 min-w-0">
           <MIcon name="receipt_long" size={14} style={{ color: 'var(--accent)' }} />
-          <div className="card-title text-sm">On-chain memo preview</div>
+          <div className="card-title text-[13.3px]">On-chain memo preview</div>
         </div>
-        <span
-          className="chip text-[10px]"
-          style={{
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border)',
-            color: 'var(--text-muted)',
-          }}
-        >
-          specs:v1
-        </span>
       </div>
       <div className="card-body py-3 flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <div
-            className="text-[10px] uppercase tracking-wider"
+            className="text-[9.5px] uppercase tracking-wider"
             style={{ color: 'var(--text-dim)' }}
           >
             Memo (UTF-8, {bytes} / 240 bytes)
@@ -720,7 +710,7 @@ function SpecsMemoCard({
           </button>
         </div>
         <pre
-          className="mono-inline text-[11px] p-2.5 overflow-auto whitespace-pre-wrap break-all"
+          className="mono-inline text-[10.5px] p-2.5 overflow-auto whitespace-pre-wrap break-all"
           style={{
             background: 'var(--bg-input)',
             border: '1px solid var(--border)',
@@ -732,7 +722,7 @@ function SpecsMemoCard({
           {memo}
         </pre>
         <div
-          className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]"
+          className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[10.5px]"
           style={{ color: 'var(--text-muted)' }}
         >
           <FieldRow k="cpu" v={snapshot.cpu} desc="CPU model (≤ 64 chars)" />

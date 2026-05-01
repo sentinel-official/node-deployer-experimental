@@ -845,8 +845,15 @@ export async function recentLogs(id: string): Promise<string[]> {
   if (!node) return [];
   if (node.target === 'local') {
     if (node.runtimeId) {
-      const lines = await containerLogs(node.runtimeId, 200);
-      if (lines.length > 0) return lines;
+      try {
+        const lines = await containerLogs(node.runtimeId, 200);
+        if (lines.length > 0) return lines;
+      } catch (err) {
+        // Best-effort: a docker-daemon-down or removed-container error
+        // here would otherwise propagate into liveStatus and hide the
+        // real container/onChain check that follows.
+        log.debug('recentLogs local failed', { err: (err as Error).message });
+      }
     }
   } else {
     const creds = sshKeyring.get(id);

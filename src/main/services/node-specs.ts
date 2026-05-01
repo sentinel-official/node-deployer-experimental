@@ -46,7 +46,12 @@ const CPU_MAX_CHARS = 64;
 // fresh-account errors as transient: the operator was just funded and
 // it can take 10–20s for every RPC peer to see the account exist.
 const TRANSIENT_ERR =
-  /timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo|EAI_AGAIN|Could not connect to the Sentinel network|none responded|sequence mismatch|account .* does not exist|account .* not found|unknown account|insufficient fund|tx already in mempool|mempool is full/i;
+  /timed out|ETIMEDOUT|ECONNREFUSED|ECONNRESET|getaddrinfo|EAI_AGAIN|Could not connect to the Sentinel network|none responded|sequence mismatch|account .* does not exist|account .* not found|unknown account|insufficient fund|tx already in mempool|tx already exists in cache|mempool is full/i;
+
+// "tx already exists in cache" / "tx already in mempool" mean the broadcast
+// was a duplicate — the previous attempt is still pending in the node's
+// mempool and will land. Treat as success: clear pending, no retry storm.
+const ALREADY_PENDING_ERR = /tx already exists in cache|tx already in mempool/i;
 
 function accountToNodeAddr(accountAddr: string): string {
   try {
@@ -308,9 +313,19 @@ export async function publishNodeSpecs(
     }
 
     if (!result || result.code !== 0) {
+      const errMsg = lastErr || 'Broadcast rejected';
+      // Duplicate broadcast — the previous attempt is sitting in the
+      // mempool and will land. Don't flag as failed or trigger replay.
+      if (ALREADY_PENDING_ERR.test(errMsg)) {
+        await updateNode(nodeId, { specsPublishPending: false });
+        log.info('specs publish duplicate, prior tx still pending', {
+          nodeId,
+          err: errMsg.slice(0, 160),
+        });
+        return { ok: true };
+      }
       // Mark for replay — startup poller will try again next session.
       await updateNode(nodeId, { specsPublishPending: true });
-      const errMsg = lastErr || 'Broadcast rejected';
       await addEvent({
         kind: 'specs-publish-failed',
         title: `Specs publish failed: ${node.moniker}`,

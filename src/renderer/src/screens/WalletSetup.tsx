@@ -39,11 +39,21 @@ export function WalletSetup() {
     }
   };
 
+  const mnemonicWordCount = mnemonic.trim().split(/\s+/).filter(Boolean).length;
+  const validBip39Lengths = [12, 15, 18, 21, 24];
+  const mnemonicLengthOk = validBip39Lengths.includes(mnemonicWordCount);
+
   const doRestore = async () => {
     setError(null);
+    if (!mnemonicLengthOk) {
+      setError(
+        `BIP-39 phrases are 12, 15, 18, 21, or 24 words — you pasted ${mnemonicWordCount}.`,
+      );
+      return;
+    }
     setBusy(true);
     try {
-      const w = await window.api.wallet.restore(mnemonic);
+      const w = await window.api.wallet.restore(mnemonic.trim());
       setWallet(w);
       setMode('funded');
       pushToast({
@@ -147,7 +157,21 @@ export function WalletSetup() {
               placeholder="tribe solution puppy eager nasty lonely …"
               className="field-input mono-inline text-sm"
               style={{ lineHeight: 1.7 }}
+              aria-invalid={mnemonicWordCount > 0 && !mnemonicLengthOk}
             />
+            <div
+              className="flex items-center justify-between text-[11px]"
+              style={{ color: 'var(--text-dim)' }}
+            >
+              <span>
+                {mnemonicWordCount === 0
+                  ? 'Awaiting input'
+                  : mnemonicLengthOk
+                  ? `${mnemonicWordCount} words — valid BIP-39 length`
+                  : `${mnemonicWordCount} words — needs 12, 15, 18, 21, or 24`}
+              </span>
+              <span>BIP-39</span>
+            </div>
             {error && <div className="callout callout-danger text-xs">{error}</div>}
             <div className="flex gap-2 justify-end">
               <button
@@ -160,7 +184,7 @@ export function WalletSetup() {
               <button
                 className="btn btn-primary"
                 onClick={doRestore}
-                disabled={busy || !mnemonic.trim()}
+                disabled={busy || !mnemonicLengthOk}
               >
                 {busy ? 'Restoring…' : 'Restore wallet'}
                 <MIcon name="arrow_forward" size={14} />

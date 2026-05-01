@@ -42,7 +42,7 @@ export function System() {
   }, []);
 
   return (
-    <div className="flex flex-col h-full min-h-0 gap-3">
+    <div className="flex flex-col gap-3">
       <div className="page-header">
         <div className="flex items-center gap-3 flex-wrap min-w-0">
           <h1 className="page-title">System</h1>
@@ -83,7 +83,7 @@ export function System() {
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0 overflow-auto auto-rows-min content-start">
+      <div className="grid grid-cols-12 gap-3">
         {!report ? (
           <div
             className="col-span-12 card grid place-items-center"

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { PageHeader } from '../components/PageHeader';
 import { BarChart } from '../components/BarChart';
 import { QRCode } from '../components/QRCode';
@@ -555,9 +555,9 @@ export function NodeDetails({ id }: Props) {
         }}
       />
 
-      <div className="grid grid-cols-12 gap-3 flex-1 min-h-0">
+      <div className="grid grid-cols-12 gap-3 items-start">
         {/* Peer chart + subscriptions stack */}
-        <div className="col-span-12 lg:col-span-7 flex flex-col gap-3 min-h-0">
+        <div className="col-span-12 lg:col-span-7 flex flex-col gap-3">
           <div className="card flex flex-col overflow-hidden">
             <div className="card-header">
               <div className="card-title">Peer count history</div>
@@ -657,7 +657,7 @@ export function NodeDetails({ id }: Props) {
                 </span>
               )}
             </div>
-            <div className="card-body flex-1 min-h-0 overflow-auto">
+            <div className="card-body overflow-auto" style={{ maxHeight: '50vh' }}>
               {!status?.reachable ? (
                 <div className="loading-state">Querying on-chain…</div>
               ) : status.activeSubscriptions.length === 0 ? (
@@ -793,7 +793,7 @@ export function NodeDetails({ id }: Props) {
               const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 20;
               logAutoScrollRef.current = atBottom;
             }}
-            className="flex-1 min-h-0 overflow-auto"
+            className="overflow-auto"
             style={{
               background: 'var(--bg-terminal)',
               borderTop: '1px solid var(--border)',
@@ -801,10 +801,12 @@ export function NodeDetails({ id }: Props) {
                 "'JetBrains Mono', 'Fira Code', Menlo, Consolas, 'Liberation Mono', monospace",
               fontSize: 11,
               lineHeight: '16px',
+              height: '50vh',
+              minHeight: 280,
             }}
           >
             {parsedLogs.length > 0 ? (
-              <div>
+              <div style={{ paddingTop: 6, paddingBottom: 12 }}>
                 {parsedLogs.map((line, i) => (
                   <LogRow key={i} line={line} />
                 ))}
@@ -1047,37 +1049,110 @@ function ExportMenuItem({
   );
 }
 
-function KeyRow({ label, value, onCopy }: { label: string; value: string; onCopy: () => void }) {
-  return (
-    <div className="flex items-center justify-between gap-2 text-[11px]">
-      <span style={{ color: 'var(--text-dim)' }}>{label}</span>
-      <button
-        onClick={onCopy}
-        className="mono-inline flex items-center gap-1 hover:underline"
-        style={{ color: 'var(--accent)' }}
-      >
-        <MIcon name="content_copy" size={11} /> {shortAddr(value, 8, 6)}
-      </button>
-    </div>
-  );
-}
-
-function SectionLabel({ children }: { children: ReactNode }) {
+// ─── IdentityDisclosure primitives ───────────────────────────────────────
+// Single canonical scale used inside the expanded "Node details" panel:
+//   PanelLabel  - section heading (10px uppercase, accent-tinted)
+//   KV          - one row, fixed left label / right value alignment
+//   Mono        - mono value cell (11.5px tabular-nums)
+//   CopyMono    - clickable mono value with copy icon (accent)
+//   PanelSection- column wrapper with consistent left divider + spacing
+function PanelLabel({ children }: { children: ReactNode }) {
   return (
     <div
-      className="text-[10px] uppercase tracking-wide font-semibold"
-      style={{ color: 'var(--text-dim)' }}
+      className="text-[9.5px] uppercase font-semibold"
+      style={{
+        color: 'var(--accent)',
+        letterSpacing: '0.08em',
+        marginBottom: 2,
+      }}
     >
       {children}
     </div>
   );
 }
 
-function dividerLeftStyle(): CSSProperties {
-  return {
-    borderTop: '1px solid var(--border)',
-    paddingTop: 12,
-  };
+function PanelSection({
+  label,
+  labelTrailing,
+  children,
+}: {
+  label: string;
+  labelTrailing?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      className="flex flex-col lg:border-l lg:pl-4"
+      style={{ borderColor: 'var(--border)', rowGap: 4 }}
+    >
+      <div className="flex items-center gap-2" style={{ marginBottom: 4 }}>
+        <PanelLabel>{label}</PanelLabel>
+        {labelTrailing}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function KV({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3"
+      style={{ minHeight: 20 }}
+    >
+      <span
+        className="text-[10.5px] uppercase"
+        style={{
+          color: 'var(--text-dim)',
+          letterSpacing: '0.04em',
+          flexShrink: 0,
+        }}
+      >
+        {label}
+      </span>
+      <span className="min-w-0 flex justify-end">{value}</span>
+    </div>
+  );
+}
+
+function Mono({
+  children,
+  title,
+  truncate,
+  maxWidth,
+}: {
+  children: ReactNode;
+  title?: string;
+  truncate?: boolean;
+  maxWidth?: number;
+}) {
+  return (
+    <span
+      className={`mono-inline tabular-nums text-[11.5px]${truncate ? ' truncate' : ''}`}
+      style={{
+        color: 'var(--text)',
+        ...(maxWidth ? { maxWidth } : null),
+      }}
+      title={title}
+    >
+      {children}
+    </span>
+  );
+}
+
+function CopyMono({ text, onClick }: { text: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mono-inline tabular-nums text-[11.5px] inline-flex items-center gap-1 hover:underline"
+      style={{ color: 'var(--accent)' }}
+      title="Copy"
+    >
+      <MIcon name="content_copy" size={11} />
+      {text}
+    </button>
+  );
 }
 
 function IdentityDisclosure({
@@ -1127,95 +1202,139 @@ function IdentityDisclosure({
       </button>
       {open && (
         <div
-          className="px-4 py-3 flex flex-col gap-4 lg:grid lg:grid-cols-12 lg:gap-4 overflow-y-auto"
-          style={{ maxHeight: 'min(60vh, 520px)' }}
+          className="overflow-y-auto"
+          style={{
+            maxHeight: 'min(60vh, 520px)',
+            padding: '14px 16px',
+          }}
         >
-          <section className="lg:col-span-3 flex flex-col items-center gap-2">
-            <SectionLabel>Address</SectionLabel>
-            {operatorAddr ? (
-              <>
-                <QRCode value={operatorAddr} size={120} />
-                <div className="text-[10px]" style={{ color: 'var(--text-dim)' }}>
-                  Operator address
+          <div
+            className="grid grid-cols-1 lg:grid-cols-[160px_minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)]"
+            style={{ columnGap: 18, rowGap: 14 }}
+          >
+            {/* Address QR */}
+            <section className="flex flex-col items-center gap-2">
+              <PanelLabel>Operator address</PanelLabel>
+              {operatorAddr ? (
+                <>
+                  <div
+                    className="rounded-md"
+                    style={{
+                      background: '#fff',
+                      border: '1px solid var(--border)',
+                      padding: 6,
+                      lineHeight: 0,
+                    }}
+                  >
+                    <QRCode value={operatorAddr} size={104} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void onCopy('Operator address', operatorAddr)}
+                    className="chip mono-inline tabular-nums"
+                    style={{
+                      fontSize: 10,
+                      padding: '3px 8px',
+                      color: 'var(--text)',
+                      background: 'var(--bg-input)',
+                      border: '1px solid var(--border)',
+                      cursor: 'pointer',
+                    }}
+                    title="Copy operator address"
+                  >
+                    <MIcon name="content_copy" size={10} />
+                    {shortAddr(operatorAddr, 6, 4)}
+                  </button>
+                </>
+              ) : (
+                <div className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+                  Awaiting operator key
                 </div>
-              </>
-            ) : (
-              <div className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
-                Awaiting operator key
-              </div>
-            )}
-          </section>
-          <section
-            className="lg:col-span-5 flex flex-col gap-1.5"
-            style={dividerLeftStyle()}
-          >
-            <SectionLabel>Identity</SectionLabel>
-            {operatorAddr && (
-              <KeyRow
-                label="Operator"
-                value={operatorAddr}
-                onCopy={() => void onCopy('Operator address', operatorAddr)}
+              )}
+            </section>
+
+            {/* Identity */}
+            <PanelSection label="Identity">
+              {operatorAddr && (
+                <KV
+                  label="Operator"
+                  value={
+                    <CopyMono
+                      onClick={() => void onCopy('Operator address', operatorAddr)}
+                      text={shortAddr(operatorAddr, 8, 6)}
+                    />
+                  }
+                />
+              )}
+              {nodeAddr && (
+                <KV
+                  label="Node"
+                  value={
+                    <CopyMono
+                      onClick={() => void onCopy('Node address', nodeAddr)}
+                      text={shortAddr(nodeAddr, 8, 6)}
+                    />
+                  }
+                />
+              )}
+              <KV label="Host" value={<Mono>{hostPort}</Mono>} />
+              <KV
+                label="Region"
+                value={
+                  <span
+                    className="inline-flex items-center gap-1.5 text-[11.5px]"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    <CountryFlag code={node.country} />
+                    {countryLabel}
+                  </span>
+                }
               />
-            )}
-            {nodeAddr && (
-              <KeyRow
-                label="Node"
-                value={nodeAddr}
-                onCopy={() => void onCopy('Node address', nodeAddr)}
+              <KV
+                label="Protocol"
+                value={
+                  <span
+                    className="text-[11.5px]"
+                    style={{ color: 'var(--text)' }}
+                  >
+                    {node.serviceType}
+                  </span>
+                }
               />
-            )}
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: 'var(--text-dim)' }}>Host</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {hostPort}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: 'var(--text-dim)' }}>Region</span>
-              <span
-                className="flex items-center gap-1"
-                style={{ color: 'var(--text)' }}
+              <button
+                className="btn btn-secondary btn-sm self-start"
+                style={{ marginTop: 6 }}
+                onClick={onReveal}
+                title="Decrypt and show this node's 24-word operator mnemonic"
               >
-                <CountryFlag code={node.country} />
-                {countryLabel}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: 'var(--text-dim)' }}>Protocol</span>
-              <span style={{ color: 'var(--text)' }}>{node.serviceType}</span>
-            </div>
-            <button
-              className="btn btn-ghost btn-sm mt-1 self-start"
-              onClick={onReveal}
-              title="Decrypt and show this node's 24-word operator mnemonic"
-            >
-              <MIcon name="key" size={12} />
-              Reveal mnemonic
-            </button>
-          </section>
-          <section
-            className="lg:col-span-4 flex flex-col gap-1.5"
-            style={dividerLeftStyle()}
-          >
-            <SectionLabel>Pricing</SectionLabel>
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: 'var(--text-dim)' }}>Per GB</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {`${fmtDVPN(node.gigabytePriceDVPN, 3)} $P2P`}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span style={{ color: 'var(--text-dim)' }}>Per hour</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {`${fmtDVPN(node.hourlyPriceDVPN, 3)} $P2P`}
-              </span>
-            </div>
-            <button className="btn btn-secondary btn-sm mt-1 self-start" onClick={onEditPricing}>
-              <MIcon name="price_change" size={12} />
-              Edit pricing
-            </button>
-          </section>
-          <SpecsReportingPanel node={node} onCopy={onCopy} />
+                <MIcon name="key" size={12} />
+                Reveal mnemonic
+              </button>
+            </PanelSection>
+
+            {/* Pricing */}
+            <PanelSection label="Pricing">
+              <KV
+                label="Per GB"
+                value={<Mono>{`${fmtDVPN(node.gigabytePriceDVPN, 3)} $P2P`}</Mono>}
+              />
+              <KV
+                label="Per hour"
+                value={<Mono>{`${fmtDVPN(node.hourlyPriceDVPN, 3)} $P2P`}</Mono>}
+              />
+              <button
+                className="btn btn-secondary btn-sm self-start"
+                style={{ marginTop: 6 }}
+                onClick={onEditPricing}
+              >
+                <MIcon name="price_change" size={12} />
+                Edit pricing
+              </button>
+            </PanelSection>
+
+            {/* Specs */}
+            <SpecsReportingPanel node={node} onCopy={onCopy} />
+          </div>
         </div>
       )}
     </div>
@@ -1238,122 +1357,98 @@ function SpecsReportingPanel({
   const explorerUrl = txHash ? `https://p2pscan.com/transactions/${txHash}` : null;
   if (!specs && !txHash && !pending) return null;
   return (
-    <div
-      className="col-span-12 mt-1 pt-3"
-      style={{ borderTop: '1px solid var(--border)' }}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <MIcon name="receipt_long" size={13} style={{ color: 'var(--accent)' }} />
-        <div
-          className="text-[10px] uppercase tracking-wide"
-          style={{ color: 'var(--text-dim)' }}
-        >
-          On-chain hardware reporting
-        </div>
-        <span
-          className="chip"
-          style={{
-            background: 'var(--bg-input)',
-            border: '1px solid var(--border)',
-            color: 'var(--text-muted)',
-            fontSize: 10,
-          }}
-        >
-          specs:v1
-        </span>
-        {pending && (
+    <PanelSection
+      label="On-chain hardware reporting"
+      labelTrailing={
+        pending ? (
           <span
             className="chip"
             style={{
-              background: 'color-mix(in srgb, var(--yellow, #f5b04a) 12%, transparent)',
-              border: '1px solid color-mix(in srgb, var(--yellow, #f5b04a) 50%, transparent)',
+              background:
+                'color-mix(in srgb, var(--yellow, #f5b04a) 14%, transparent)',
+              border:
+                '1px solid color-mix(in srgb, var(--yellow, #f5b04a) 50%, transparent)',
               color: 'var(--text)',
-              fontSize: 10,
+              fontSize: 9,
+              padding: '2px 6px',
+              letterSpacing: 0,
+              textTransform: 'none',
             }}
           >
             Awaiting broadcast
           </span>
-        )}
-      </div>
-      <div className="grid grid-cols-12 gap-3 text-[11px]">
-        {specs && (
-          <div className="col-span-12 md:col-span-7 grid grid-cols-2 gap-1.5">
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>CPU</span>
-              <span
-                className="mono-inline truncate"
-                style={{ color: 'var(--text)', maxWidth: '60%' }}
-                title={specs.cpu}
-              >
+        ) : null
+      }
+    >
+      {specs && (
+        <>
+          <KV
+            label="CPU"
+            value={
+              <Mono title={specs.cpu} truncate maxWidth={220}>
                 {specs.cpu || '—'}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>Cores</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {specs.cr}/{specs.c}
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>RAM</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {Math.round(specs.r / 1024)} GiB
-              </span>
-            </div>
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>RAM reserved</span>
-              <span className="mono-inline" style={{ color: 'var(--text)' }}>
-                {Math.round(specs.rr / 1024)} GiB
-              </span>
-            </div>
-          </div>
-        )}
-        <div className="col-span-12 md:col-span-5 flex flex-col gap-1.5">
-          {publishedAt && (
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>Published</span>
-              <span style={{ color: 'var(--text)' }}>{publishedAt}</span>
-            </div>
-          )}
-          {txHash ? (
-            <div className="flex items-center justify-between gap-2">
-              <span style={{ color: 'var(--text-dim)' }}>Tx</span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  className="btn-ghost text-[11px] inline-flex items-center gap-1"
-                  onClick={() => void onCopy('Specs tx hash', txHash)}
-                  title="Copy tx hash"
+              </Mono>
+            }
+          />
+          <KV label="Cores" value={<Mono>{`${specs.cr}/${specs.c}`}</Mono>} />
+          <KV
+            label="RAM"
+            value={<Mono>{`${Math.round(specs.r / 1024)} GiB`}</Mono>}
+          />
+          <KV
+            label="RAM reserved"
+            value={<Mono>{`${Math.round(specs.rr / 1024)} GiB`}</Mono>}
+          />
+        </>
+      )}
+      {publishedAt && (
+        <KV
+          label="Published"
+          value={
+            <span
+              className="text-[11.5px] tabular-nums"
+              style={{ color: 'var(--text)' }}
+            >
+              {publishedAt}
+            </span>
+          }
+        />
+      )}
+      {txHash ? (
+        <KV
+          label="Tx"
+          value={
+            <span className="inline-flex items-center gap-2">
+              <CopyMono
+                onClick={() => void onCopy('Specs tx hash', txHash)}
+                text={shortAddr(txHash, 8, 6)}
+              />
+              {explorerUrl && (
+                <a
+                  className="text-[11px] inline-flex items-center gap-0.5 hover:underline"
+                  style={{ color: 'var(--accent)' }}
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="View on p2pscan"
                 >
-                  <MIcon name="content_copy" size={11} />
-                  <span className="mono-inline">{shortAddr(txHash, 8, 6)}</span>
-                </button>
-                {explorerUrl && (
-                  <a
-                    className="text-[11px] inline-flex items-center gap-0.5"
-                    style={{ color: 'var(--accent)' }}
-                    href={explorerUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    title="View on p2pscan"
-                  >
-                    View tx
-                    <MIcon name="open_in_new" size={11} />
-                  </a>
-                )}
-              </div>
-            </div>
-          ) : pending ? (
-            <div style={{ color: 'var(--text-dim)' }}>
-              Broadcast queued — will retry on next app start if it failed.
-            </div>
-          ) : (
-            <div style={{ color: 'var(--text-dim)' }}>
-              No specs tx recorded for this node.
-            </div>
-          )}
+                  View
+                  <MIcon name="open_in_new" size={11} />
+                </a>
+              )}
+            </span>
+          }
+        />
+      ) : pending ? (
+        <div className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+          Broadcast queued — will retry on next app start if it failed.
         </div>
-      </div>
-    </div>
+      ) : (
+        <div className="text-[11px]" style={{ color: 'var(--text-dim)' }}>
+          No specs tx recorded for this node.
+        </div>
+      )}
+    </PanelSection>
   );
 }
 
@@ -1503,7 +1598,12 @@ function PricingEditor({
   const [giga, setGiga] = useState(String(initialGiga));
   const [hour, setHour] = useState(String(initialHour));
   const [pending, setPending] = useState(false);
-  const valid = Number(giga) >= 0 && Number(hour) >= 0;
+  const gigaNum = Number(giga);
+  const hourNum = Number(hour);
+  const gigaOver = Number.isFinite(gigaNum) && gigaNum > 80;
+  const hourOver = Number.isFinite(hourNum) && hourNum > 80;
+  const priceOverNetwork = gigaOver || hourOver;
+  const valid = gigaNum >= 0 && hourNum >= 0 && !priceOverNetwork;
   return (
     <div className="fixed inset-0 z-40 grid place-items-center bg-black/60 backdrop-blur-sm no-drag">
       <div className="card-elev w-[440px] max-w-[92vw]">
@@ -1538,6 +1638,7 @@ function PricingEditor({
                 type="number"
                 step="0.0001"
                 className="field-input"
+                aria-invalid={gigaOver}
               />
             </div>
             <div>
@@ -1548,9 +1649,20 @@ function PricingEditor({
                 type="number"
                 step="0.0001"
                 className="field-input"
+                aria-invalid={hourOver}
               />
             </div>
           </div>
+
+          {priceOverNetwork && (
+            <div className="mt-3 callout callout-warn text-xs flex items-start gap-2 py-1.5">
+              <MIcon name="warning" size={14} />
+              <span>
+                Network rules cap pricing at <b>80 $P2P</b> per GB or per hour. Updates
+                priced above will be rejected by the chain.
+              </span>
+            </div>
+          )}
 
           <div className="mt-6 flex items-center justify-end gap-2">
             <button className="btn btn-secondary" onClick={onCancel} disabled={pending}>
