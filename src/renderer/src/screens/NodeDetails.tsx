@@ -459,25 +459,56 @@ export function NodeDetails({ id }: Props) {
 
       {/* Stat row */}
       <div className="grid grid-cols-12 gap-3">
-        <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
-          <div className="stat-label">Operator balance</div>
-          <div className="flex items-center justify-center gap-2 flex-wrap">
-            <div className="stat-value" style={{ color: 'var(--accent)' }}>
-              {fmtDVPN(node.balanceDVPN)}{' '}
-              <span className="text-sm font-semibold" style={{ color: 'var(--text-dim)' }}>
-                $P2P
-              </span>
-            </div>
-            <button
-              className="btn btn-primary btn-sm flex-shrink-0"
-              onClick={openWithdraw}
-              disabled={!!busy || node.balanceDVPN < 0.001}
-              style={{ position: 'relative', zIndex: 1 }}
+        <div
+          className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center"
+          style={{
+            background:
+              'linear-gradient(180deg, color-mix(in srgb, var(--accent) 9%, var(--bg-card)) 0%, var(--bg-card) 70%)',
+            borderColor: 'color-mix(in srgb, var(--accent) 26%, var(--border))',
+          }}
+        >
+          <div className="flex items-center justify-center gap-1.5">
+            <span
+              className="inline-flex items-center justify-center rounded-full"
+              style={{
+                width: 18,
+                height: 18,
+                background: 'color-mix(in srgb, var(--accent) 18%, transparent)',
+                color: 'var(--accent)',
+              }}
             >
-              <MIcon name="north_east" size={12} />
-              Withdraw
-            </button>
+              <MIcon name="account_balance_wallet" size={11} />
+            </span>
+            <div className="stat-label" style={{ marginBottom: 0 }}>
+              Operator balance
+            </div>
           </div>
+          <div
+            className="stat-value flex items-baseline justify-center gap-1.5"
+            style={{ color: 'var(--accent)' }}
+          >
+            <span style={{ letterSpacing: '-0.01em' }}>{fmtDVPN(node.balanceDVPN)}</span>
+            <span
+              className="text-[11px] font-semibold uppercase tracking-wider"
+              style={{ color: 'var(--text-dim)' }}
+            >
+              $P2P
+            </span>
+          </div>
+          <button
+            className="btn btn-primary btn-sm mt-1.5 flex-shrink-0"
+            onClick={openWithdraw}
+            disabled={!!busy || node.balanceDVPN < 0.001}
+            style={{ position: 'relative', zIndex: 1 }}
+            title={
+              node.balanceDVPN < 0.001
+                ? 'Nothing to withdraw'
+                : 'Withdraw earnings to your wallet'
+            }
+          >
+            <MIcon name="north_east" size={12} />
+            Withdraw
+          </button>
         </div>
         <div className="stat-card col-span-6 lg:col-span-3 flex flex-col items-center text-center">
           <div className="stat-label">Chain status</div>
