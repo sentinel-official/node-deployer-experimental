@@ -16,14 +16,15 @@ export const DEFAULT_GAS_PRICE_UDVPN = '0.1';
 
 /**
  * Public RPC pool. The app picks whichever endpoint answers fastest and
- * falls through on failure. These are the three endpoints named by the
- * Sentinel docs + two community validators (AutoStake + Polkachu) with
- * historically strong uptime.
+ * falls through on failure. The Sentinel docs endpoint plus three
+ * community validators (AutoStake, Polkachu, SuchNode) with historically
+ * strong uptime.
  */
 export const DEFAULT_RPC_POOL: readonly string[] = [
   'https://rpc.sentinel.co:443',
   'https://sentinel-mainnet-rpc.autostake.com:443',
   'https://sentinel-rpc.polkachu.com:443',
+  'https://rpc.sentinel.suchnode.net:443',
 ];
 
 export const udvpnToDvpn = (u: string | number | bigint): number => {
