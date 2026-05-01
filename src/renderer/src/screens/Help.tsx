@@ -178,7 +178,7 @@ export function Help() {
   const [activeId, setActiveId] = useState<string>(SECTIONS[0]!.id);
   const [query, setQuery] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
-  const sectionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
 
   useEffect(() => {
     void window.api.updater.status().then(setUpdater);
