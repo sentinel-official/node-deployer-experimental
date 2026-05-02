@@ -16,14 +16,27 @@ export const DEFAULT_GAS_PRICE_UDVPN = '0.1';
 
 /**
  * Public RPC pool. The app picks whichever endpoint answers fastest and
- * falls through on failure. These are the three endpoints named by the
- * Sentinel docs + two community validators (AutoStake + Polkachu) with
- * historically strong uptime.
+ * falls through on failure.
+ *
+ * Audited 2026-05-02 against a known funded address — every entry below
+ * reported `catching_up=false` AND served a correct ABCI bank balance.
+ * `rpc.sentinel.co` is kept last as a stale-fallback only: it has been
+ * stuck behind tip while reporting `catching_up=false`, returning stale
+ * balances for several weeks. New code should not rely on it as primary.
+ *
+ * Primary picks (busurnode + suchnode + publicnode + trinitystake) are
+ * sub-500ms in the audit; community validators (polkachu, freshSTAKING)
+ * follow; sentinel.co last.
  */
 export const DEFAULT_RPC_POOL: readonly string[] = [
-  'https://rpc.sentinel.co:443',
-  'https://sentinel-mainnet-rpc.autostake.com:443',
+  'https://rpc-sentinel.busurnode.com',
+  'https://rpc.sentinel.suchnode.net',
+  'https://sentinel-rpc.publicnode.com',
+  'https://rpc.trinitystake.io',
   'https://sentinel-rpc.polkachu.com:443',
+  'https://sentinel-mainnet-rpc.autostake.com:443',
+  'https://sentinel-rpc.freshstaking.com',
+  'https://rpc.sentinel.co:443',
 ];
 
 export const udvpnToDvpn = (u: string | number | bigint): number => {

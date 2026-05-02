@@ -94,7 +94,7 @@ Electron ABI. If you later want to run unit tests, run
 | Address format | bech32; app + nodes use the `sent` HRP, chain-side node identity is `sentnode` |
 | At-rest encryption | Electron `safeStorage` (OS keychain: Keychain / DPAPI / libsecret) |
 | Balance query | `StargateClient.getBalance(addr, 'udvpn')` |
-| RPC pool | Three endpoints (rpc.sentinel.co + AutoStake + Polkachu) with latency-aware failover |
+| RPC pool | Eight audited endpoints (busurnode → suchnode → publicnode → trinitystake → polkachu → autostake → freshSTAKING → sentinel.co) with latency-aware failover. Audited 2026-05-02; sentinel.co kept last as a stale-fallback only. |
 | Send / MsgSend | `SigningSentinelClient.sendTokens` with explicit StdFee; error codes classified |
 | Operator seeding | 1 DVPN auto-transferred to each new node's operator address on deploy |
 | QR code | Real SVG from `qrcode` in main, inlined in renderer |
