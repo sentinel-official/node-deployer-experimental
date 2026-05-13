@@ -1,39 +1,47 @@
 /** @type {import('tailwindcss').Config} */
 export default {
   content: ['./src/renderer/index.html', './src/renderer/src/**/*.{ts,tsx}'],
+  darkMode: ['class', 'html[data-theme="dark"]'],
   theme: {
     extend: {
       colors: {
-        // Approximated from the provided dark-theme mockups
         bg: {
-          DEFAULT: '#0B1020',
-          soft: '#0F162B',
-          card: '#131B33',
-          elev: '#182243',
-          sidebar: '#0A0F20',
-          input: '#0D1428',
+          DEFAULT: 'var(--bg)',
+          card: 'var(--bg-card)',
+          'card-hover': 'var(--bg-card-hover)',
+          input: 'var(--bg-input)',
+          // Back-compat aliases for old code — all collapse to bg-card
+          soft: 'var(--bg-card)',
+          elev: 'var(--bg-card-hover)',
+          sidebar: 'var(--bg)',
         },
         border: {
-          DEFAULT: '#1E2A4E',
-          soft: '#26325A',
+          DEFAULT: 'var(--border)',
+          hover: 'var(--border-hover)',
+          soft: 'var(--border)',
         },
         text: {
-          DEFAULT: '#E6ECFF',
-          muted: '#8A97C3',
-          dim: '#5E6B94',
+          DEFAULT: 'var(--text)',
+          muted: 'var(--text-dim)',
+          dim: 'var(--text-muted)',
         },
         accent: {
-          DEFAULT: '#4F7CFF',
-          strong: '#3A64E8',
-          soft: '#2A3E7A',
+          DEFAULT: 'var(--accent)',
+          strong: 'var(--accent-hover)',
+          soft: 'var(--accent-glow)',
+          dim: 'var(--accent-dim)',
         },
-        success: '#2ED37E',
-        warning: '#F2B33C',
-        danger: '#F25C6A',
+        success: 'var(--green)',
+        'success-dim': 'var(--green-dim)',
+        warning: 'var(--yellow)',
+        'warning-dim': 'var(--yellow-dim)',
+        danger: 'var(--red)',
+        'danger-dim': 'var(--red-dim)',
       },
       fontFamily: {
         sans: [
-          'Inter',
+          'Europa',
+          'Poppins',
           'ui-sans-serif',
           'system-ui',
           '-apple-system',
@@ -41,10 +49,19 @@ export default {
           'Roboto',
           'sans-serif',
         ],
-        mono: ['JetBrains Mono', 'Menlo', 'ui-monospace', 'monospace'],
+        display: ['Europa', 'Poppins', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        mono: ['Noto Sans Mono', 'JetBrains Mono', 'ui-monospace', 'Menlo', 'monospace'],
+      },
+      borderRadius: {
+        sm: 'var(--radius-sm)',
+        DEFAULT: 'var(--radius-md)',
+        md: 'var(--radius-md)',
+        lg: 'var(--radius-lg)',
+        xl: 'var(--radius-xl)',
       },
       boxShadow: {
-        card: '0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 24px rgba(0,0,0,0.35)',
+        card: 'var(--shadow-card)',
+        elev: 'var(--shadow-elev)',
       },
     },
   },

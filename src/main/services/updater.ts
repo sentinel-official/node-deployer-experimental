@@ -28,6 +28,27 @@ interface State {
 
 let state: State = { stage: 'idle' };
 
+export function getUpdaterState(): State {
+  return state;
+}
+
+export async function checkForUpdatesNow(): Promise<State> {
+  if (!app.isPackaged) return state;
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (err) {
+    update({ stage: 'error', error: (err as Error).message });
+  }
+  return state;
+}
+
+export function installPendingUpdate(): { ok: boolean; error?: string } {
+  if (!app.isPackaged) return { ok: false, error: 'Dev mode — updater disabled' };
+  if (state.stage !== 'ready') return { ok: false, error: 'No update ready' };
+  setImmediate(() => autoUpdater.quitAndInstall());
+  return { ok: true };
+}
+
 function broadcast(): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(IPC_UPDATER.CHANGED, state);
@@ -85,7 +106,7 @@ export function startUpdater(): void {
       buttons: ['Install + restart', 'Later'],
       defaultId: 0,
       cancelId: 1,
-      message: `Install Sentinel dVPN v${state.version}?`,
+      message: `Install Sentinel Node Manager v${state.version}?`,
       detail: 'The app will quit and reopen on the new version.',
     });
     if (choice.response === 0) {

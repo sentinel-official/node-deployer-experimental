@@ -7,17 +7,24 @@ import {
   IMAGE_TAG,
   IMAGE_VERSION,
   SENTINEL_DVPNX_DOCKERFILE,
+  containerLogs,
   dockerHealth,
   ensureImage,
+  hasImage,
+  isRunning,
   runOnce,
+  withDockerTimeout,
 } from './docker';
 import { getSettings } from './settings';
 import { DENOM, DEFAULT_RPC_POOL } from './chain';
 import { readStore, writeStore } from './store';
 import { addEvent } from './events';
-import { generateNodeKey, sendTokens } from './wallet';
-import { ensureNodePersisted, nodeDataDir, rememberSSH, startNode } from './node-manager';
+import { fetchBalance, generateNodeKey, sendTokens } from './wallet';
+import { formatPrices } from './price';
+import { ensureNodePersisted, getNode, nodeDataDir, rememberSSH, removeNode, startNode, updateNode } from './node-manager';
 import { uploadFile, withSSH, runRemote, shellQuote } from './ssh';
+import { captureLocalSpecs, publishNodeSpecs } from './node-specs';
+import type { Client } from 'ssh2';
 import { log } from './logger';
 import type {
   DeployPhase,
@@ -56,6 +63,14 @@ import type {
  */
 const OPERATOR_SEED_DVPN = 1;
 
+/**
+ * Gas headroom required on top of the seed amount for the MsgSend that funds
+ * the operator. A MsgSend at the default gas price costs ~0.002 DVPN; we ask
+ * for 0.05 to absorb gas-price spikes and leave the wallet with a non-zero
+ * balance after the seed.
+ */
+const DEPLOY_GAS_BUFFER_DVPN = 0.05;
+
 type ProgressFn = (p: DeployProgress) => void;
 type PushFn = (
   phase: DeployPhase,
@@ -68,9 +83,25 @@ type PushFn = (
 interface RunningJob {
   jobId: string;
   cancel: () => void;
+  abort: AbortController;
+  onProgress: ProgressFn;
+  lockKey: string;
 }
 
 const jobs = new Map<string, RunningJob>();
+// Last DeployProgress event seen per job, kept long enough for CLI clients
+// to poll `deploy.status <jobId>` after a `deploy.start`. Cleared 60s after
+// a terminal phase ('done' | 'error' | 'cancelled').
+const lastProgress = new Map<string, DeployProgress>();
+const TERMINAL_PHASES = new Set<DeployProgress['phase']>(['done', 'error', 'cancelled']);
+
+export function getDeployProgress(jobId: string): DeployProgress | null {
+  return lastProgress.get(jobId) ?? null;
+}
+
+export function listDeployProgress(): DeployProgress[] {
+  return Array.from(lastProgress.values());
+}
 
 export async function startDeploy(
   req: DeployRequest,
@@ -79,9 +110,73 @@ export async function startDeploy(
   const jobId = crypto.randomUUID();
   const nodeId = crypto.randomUUID();
 
+  // Concurrent-deploy guard. Two simultaneous deploys to the same target
+  // race on the local Docker daemon and on the same data-dir prefix —
+  // BuildKit can serialise at most one build per Dockerfile, and parallel
+  // `docker run -p` against the same port crashes the second one with
+  // "address already in use". Key the lock by target host so a remote +
+  // local deploy can still run side-by-side.
+  const lockKey = req.target === 'remote' ? `remote:${req.ssh?.host ?? ''}` : 'local';
+  for (const j of jobs.values()) {
+    if (j.lockKey === lockKey) {
+      throw new Error(
+        req.target === 'remote'
+          ? `A node is already being deployed to ${req.ssh?.host}. Please wait for it to finish, or cancel it from the bar at the top of the window.`
+          : 'A node is already being deployed on this computer. Please wait for it to finish, or cancel it from the bar at the top of the window.',
+      );
+    }
+  }
+
   const store = await readStore();
   if (!store.wallet?.address) {
-    throw new Error('Create or restore a wallet before deploying a node.');
+    throw new Error('You need a wallet first. Create a new wallet or restore one from a recovery phrase before deploying a node.');
+  }
+
+  // Cap concurrent local nodes. The chain treats nodes on the same public IP
+  // as duplicates for directory ranking, and each extra node multiplies disk,
+  // CPU, and bandwidth load on the host. Three is the soft ceiling we expose;
+  // above that the UX falls apart even before docker complains.
+  const MAX_LOCAL_NODES = 3;
+  if (req.target === 'local') {
+    const localCount = store.nodes.filter((n) => n.target === 'local').length;
+    if (localCount >= MAX_LOCAL_NODES) {
+      throw new Error(
+        `This computer already has ${localCount} nodes running, which is the maximum (${MAX_LOCAL_NODES}). Please remove one from the Nodes page before deploying another.`,
+      );
+    }
+    if (store.nodes.some((n) => n.target === 'local' && n.port === req.port)) {
+      throw new Error(
+        `Port ${req.port} is already used by one of your other nodes. Please pick a different port number.`,
+      );
+    }
+  }
+  if (!Number.isInteger(req.port) || req.port < 1024 || req.port > 65535) {
+    throw new Error('The port must be a whole number between 1024 and 65535.');
+  }
+
+  // Balance preflight: the deploy flow seeds OPERATOR_SEED_DVPN from the app
+  // wallet to the new operator address. Without this gate the chain rejects
+  // the MsgSend with `insufficient funds` AFTER we've already burned work on
+  // key generation, container builds, and the user's screen. Fail fast with
+  // a clear, actionable message instead.
+  const required = OPERATOR_SEED_DVPN + DEPLOY_GAS_BUFFER_DVPN;
+  let liveBalance: number;
+  try {
+    liveBalance = await fetchBalance(store.wallet.address);
+  } catch (err) {
+    throw new Error(
+      `Could not check your app wallet balance before deploying. ` +
+        `Please check your internet connection and try again. Details: ${(err as Error).message}.`,
+    );
+  }
+  if (liveBalance < required) {
+    const short = (required - liveBalance).toFixed(4);
+    throw new Error(
+      `Your app wallet does not have enough P2P to start a new node. ` +
+        `You have ${liveBalance.toFixed(4)} P2P. You need ${required.toFixed(2)} P2P ` +
+        `(${OPERATOR_SEED_DVPN} P2P to start the node, plus a tiny ${DEPLOY_GAS_BUFFER_DVPN.toFixed(2)} P2P for network fees). ` +
+        `Add at least ${short} more P2P to the app wallet, then try again.`,
+    );
   }
 
   // Mint the node's own operator key locally (24-word mnemonic, same HD
@@ -104,6 +199,9 @@ export async function startDeploy(
     port: req.port,
     gigabytePriceDVPN: req.gigabytePriceDVPN,
     hourlyPriceDVPN: req.hourlyPriceDVPN,
+    priceMode: req.priceMode ?? 'flat',
+    usdGigabytePrice: req.usdGigabytePrice,
+    usdHourlyPrice: req.usdHourlyPrice,
     serviceType: req.serviceType,
     registeredOnChain: false,
     remoteUrl: req.remoteUrl,
@@ -131,11 +229,48 @@ export async function startDeploy(
   });
 
   let cancelled = false;
-  jobs.set(jobId, { jobId, cancel: () => (cancelled = true) });
+  const abort = new AbortController();
+  jobs.set(jobId, {
+    jobId,
+    cancel: () => {
+      cancelled = true;
+      abort.abort();
+    },
+    abort,
+    onProgress,
+    lockKey,
+  });
 
+  // Carry the mnemonic only on the FIRST non-error frame (so the renderer's
+  // seed-phrase modal opens immediately at deploy start) and on the terminal
+  // 'done' frame (so callers that miss the first frame still see it). Every
+  // intermediate frame omits it: cuts seed exposure in IPC traffic from O(N)
+  // frames to 2, while keeping the existing renderer flow unchanged.
+  let mnemonicEmitted = false;
   const push: PushFn = (phase, percent, message, log, extras = {}) => {
     if (cancelled && phase !== 'error') return;
-    onProgress({ jobId, nodeId, phase, percent, message, log, ...extras });
+    const carryMnemonic =
+      phase !== 'error' &&
+      phase !== 'cancelled' &&
+      (!mnemonicEmitted || phase === 'done');
+    if (carryMnemonic) mnemonicEmitted = true;
+    const progress: DeployProgress = {
+      jobId,
+      nodeId,
+      phase,
+      percent,
+      message,
+      log: scrubLog(log),
+      ...(carryMnemonic
+        ? { mnemonicForBackup: nodeMnemonic, operatorAddress }
+        : {}),
+      ...extras,
+    };
+    lastProgress.set(jobId, progress);
+    if (TERMINAL_PHASES.has(phase)) {
+      setTimeout(() => lastProgress.delete(jobId), 60_000).unref?.();
+    }
+    onProgress(progress);
   };
 
   void (async () => {
@@ -145,7 +280,7 @@ export async function startDeploy(
       // transaction; without this step the node errors out at startup with
       // "account does not exist" while trying to query its own account
       // info, and the container restart-loops forever.
-      push('configure', 2, 'Funding operator address', `[${ts()}] seeding ${OPERATOR_SEED_DVPN} DVPN from app wallet → ${operatorAddress}`);
+      push('preflight', 1, 'Sending 1 P2P to the new node', `[${ts()}] sending ${OPERATOR_SEED_DVPN} P2P from app wallet → ${operatorAddress}`);
       const fund = await sendTokens({
         to: operatorAddress,
         amountDVPN: OPERATOR_SEED_DVPN,
@@ -153,55 +288,115 @@ export async function startDeploy(
       });
       if (!fund.ok) {
         throw new Error(
-          `Funding operator address failed: ${fund.error ?? 'unknown'}. ` +
+          `Could not send P2P to the new node: ${fund.error ?? 'unknown error'}. ` +
             (fund.errorCode === 'insufficient-funds'
-              ? `Your app wallet needs at least ${OPERATOR_SEED_DVPN} DVPN (plus a little gas) before deploying a node.`
+              ? `Your app wallet needs at least ${OPERATOR_SEED_DVPN} P2P (plus a small amount for network fees) before you can start a new node.`
               : ''),
         );
       }
-      push('configure', 4, 'Operator address funded', `[${ts()}] tx ${fund.txHash?.slice(0, 16)}… · height ${fund.height}`);
+      push('preflight', 3, 'New node funded', `[${ts()}] tx ${fund.txHash?.slice(0, 16)}… · height ${fund.height}`);
 
       if (req.target === 'remote') {
-        await runRemoteDeploy(req, node, nodeMnemonic, push, () => cancelled);
+        await runRemoteDeploy(req, node, nodeMnemonic, push, () => cancelled, abort.signal);
       } else {
-        await runLocalDeploy(req, node, nodeMnemonic, push, () => cancelled);
+        await runLocalDeploy(req, node, nodeMnemonic, push, () => cancelled, abort.signal);
       }
-      if (cancelled) return;
-      push('done', 100, 'Node is online', `[${ts()}] ${node.moniker} is online on port ${node.port}.`, {
-        operatorAddress,
-        mnemonicForBackup: nodeMnemonic,
-      });
+      if (cancelled) {
+        await purgeCancelledNode(nodeId);
+        return;
+      }
+      // push() adds mnemonicForBackup + operatorAddress for 'done' automatically.
+      push('done', 100, 'Node is online', `[${ts()}] ${node.moniker} is online on port ${node.port}.`);
       await addEvent({
         kind: 'deploy-succeeded',
         title: `Node ${node.moniker} is online`,
         subtitle: req.target === 'remote' ? `Remote · ${req.ssh?.host}` : 'Local device',
         relatedNodeId: nodeId,
       });
+      // Remote deploys construct the container directly via SSH-driven
+      // `docker run` and never pass through startNode, so the `node-started`
+      // emit baked into startNode never fires for them. Emit it here for
+      // remote-only — local deploys already get one from startNode at the
+      // verified-container-up gate.
+      if (req.target === 'remote') {
+        await addEvent({
+          kind: 'node-started',
+          title: `Node ${node.moniker} started`,
+          subtitle: `Remote · ${req.ssh?.host}`,
+          relatedNodeId: nodeId,
+        });
+      }
+
+      // Mark the node as awaiting on-chain spec publish; the actual broadcast
+      // is fire-and-forget so a transient RPC outage doesn't make `deploy`
+      // look like it failed. The startup replay path picks up anything that
+      // didn't make it through.
+      //
+      // Only remote deploys publish from here. Local deploys go through
+      // startNode at the verified-container-up gate, which already triggers
+      // republishSpecs(); double-publishing would race the same tx into the
+      // mempool and trip the "tx already exists in cache" path.
+      if (req.target === 'remote') {
+        void updateNode(nodeId, { specsPublishPending: true });
+        void (async () => {
+          try {
+            // Give the new operator account time for the seed-funding tx to
+            // fully propagate across the RPC pool. 5s was too short — many
+            // RPCs still returned `account does not exist` and bailed. 12s
+            // catches the slowest peers; the fresh-account error is also
+            // now in TRANSIENT_ERR so any residual lag retries cleanly.
+            await new Promise((r) => setTimeout(r, 12_000));
+            push(
+              'done',
+              100,
+              'Node is online',
+              `[${ts()}] Publishing hardware specs on-chain (specs:v1)…`,
+            );
+            const specsRes = await publishNodeSpecs(nodeId, { force: true });
+            if (specsRes.ok) {
+              push(
+                'done',
+                100,
+                'Node is online',
+                `[${ts()}] Specs reported on-chain · tx ${specsRes.txHash?.slice(0, 16)}…`,
+              );
+            } else {
+              log.warn('specs publish skipped', { nodeId, err: specsRes.error });
+            }
+          } catch (specsErr) {
+            log.warn('specs publish threw', { nodeId, err: (specsErr as Error).message });
+          }
+        })();
+      }
     } catch (err) {
       const msg = (err as Error).message ?? 'Unknown error';
       log.error('deploy failed', { id: nodeId, err: msg });
-      push('error', 0, 'Deployment failed', `[${ts()}] ${msg}`);
-      await addEvent({
-        kind: 'deploy-failed',
-        title: `Deployment failed: ${node.moniker}`,
-        subtitle: msg.slice(0, 180),
-        relatedNodeId: nodeId,
-      });
-      // Drop the failed node from the inventory so the user isn't left
-      // with a zombie entry. Any transient backup / logs / metrics for
-      // the nodeId are purged too.
-      try {
-        const s = await readStore();
-        s.nodes = s.nodes.filter((x) => x.id !== nodeId);
-        delete s.logs[nodeId];
-        delete s.nodeBackups[nodeId];
-        await writeStore(s);
-        const { BrowserWindow } = await import('electron');
-        for (const win of BrowserWindow.getAllWindows()) {
-          win.webContents.send('nodes:changed', null);
+      if (cancelled) {
+        await purgeCancelledNode(nodeId);
+      } else {
+        push('error', 0, 'Deployment failed', `[${ts()}] ${msg}`);
+        await addEvent({
+          kind: 'deploy-failed',
+          title: `Deployment failed: ${node.moniker}`,
+          subtitle: msg.slice(0, 180),
+          relatedNodeId: nodeId,
+        });
+        // Drop the failed node from the inventory so the user isn't left
+        // with a zombie entry. Any transient backup / logs / metrics for
+        // the nodeId are purged too.
+        try {
+          const s = await readStore();
+          s.nodes = s.nodes.filter((x) => x.id !== nodeId);
+          delete s.logs[nodeId];
+          delete s.nodeBackups[nodeId];
+          await writeStore(s);
+          const { BrowserWindow } = await import('electron');
+          for (const win of BrowserWindow.getAllWindows()) {
+            win.webContents.send('nodes:changed', null);
+          }
+        } catch (cleanupErr) {
+          log.warn('failed-deploy cleanup errored', { err: String(cleanupErr) });
         }
-      } catch (cleanupErr) {
-        log.warn('failed-deploy cleanup errored', { err: String(cleanupErr) });
       }
     } finally {
       jobs.delete(jobId);
@@ -214,14 +409,91 @@ export async function startDeploy(
 export function cancelDeploy(jobId: string): boolean {
   const job = jobs.get(jobId);
   if (!job) return false;
+  const onProgress = job.onProgress;
   job.cancel();
   jobs.delete(jobId);
+  const prev = lastProgress.get(jobId);
+  const cancelled: DeployProgress = prev
+    ? {
+        ...prev,
+        phase: 'cancelled',
+        message: 'Cancelled',
+        log: `[${ts()}] Deploy cancelled by user.`,
+        // Strip any seed material from the cancelled frame — the renderer
+        // already cached it on the first non-error frame, and broadcasting
+        // it again on every cancel just widens the IPC exposure window.
+        mnemonicForBackup: undefined,
+      }
+    : {
+        jobId,
+        nodeId: '',
+        phase: 'cancelled',
+        percent: 0,
+        message: 'Cancelled',
+        log: `[${ts()}] Deploy cancelled by user.`,
+      };
+  lastProgress.set(jobId, cancelled);
+  setTimeout(() => lastProgress.delete(jobId), 60_000).unref?.();
+  // Broadcast the cancelled frame so the renderer's IPC.DEPLOY_PROGRESS
+  // subscriber updates immediately. Without this the Topbar chip and the
+  // Progress screen only flip to 'cancelled' if a poll happens to fire.
+  try {
+    onProgress(cancelled);
+  } catch (e) {
+    log.warn('cancel broadcast failed', { jobId, err: String(e) });
+  }
   return true;
+}
+
+/**
+ * Tear down everything a cancelled deploy may have created so the user isn't
+ * left with a zombie node entry, a half-built container, or a populated
+ * remote data dir. Routes through removeNode (which handles container
+ * removal, data-dir cleanup, remote SSH teardown) and broadcasts a
+ * NODES_CHANGED so the UI refreshes immediately.
+ */
+async function purgeCancelledNode(nodeId: string): Promise<void> {
+  try {
+    await removeNode(nodeId);
+  } catch (err) {
+    log.warn('cancelled-deploy cleanup failed', { nodeId, err: String(err) });
+    // Belt-and-braces: even if removeNode threw mid-way, scrub the store
+    // entry so the renderer doesn't keep showing a phantom 'loading' node.
+    try {
+      const s = await readStore();
+      s.nodes = s.nodes.filter((x) => x.id !== nodeId);
+      delete s.logs[nodeId];
+      delete s.nodeBackups[nodeId];
+      await writeStore(s);
+      const { BrowserWindow } = await import('electron');
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('nodes:changed', null);
+      }
+    } catch (storeErr) {
+      log.warn('cancelled-deploy store scrub failed', { nodeId, err: String(storeErr) });
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
 // LOCAL
 // ---------------------------------------------------------------------------
+
+// Re-probe the Docker daemon between long-running phases. A daemon that died
+// or was restarted (Docker Desktop "Reset to factory defaults", a Windows
+// update, OOM kill) mid-deploy will surface as a cryptic ECONNREFUSED on the
+// next dockerode call — sometimes minutes after the user actually lost the
+// daemon. Failing fast with a specific message saves the user from staring
+// at a stalled container-wait.
+async function recheckDockerDaemon(): Promise<void> {
+  const health = await dockerHealth();
+  if (!health.reachable) {
+    throw new Error(
+      `Docker stopped responding while the node was being deployed (${health.error}). ` +
+        `Please restart Docker Desktop and try again.`,
+    );
+  }
+}
 
 async function runLocalDeploy(
   req: DeployRequest,
@@ -229,21 +501,65 @@ async function runLocalDeploy(
   nodeMnemonic: string,
   push: PushFn,
   isCancelled: () => boolean,
+  signal: AbortSignal,
 ): Promise<void> {
-  push('preflight', 4, 'Checking Docker', `[${ts()}] Probing the Docker daemon…`);
+  push('docker-check', 6, 'Checking Docker', `[${ts()}] Checking that Docker is running…`);
   const health = await dockerHealth();
   if (!health.reachable) {
-    throw new Error(
-      `Docker is not reachable: ${health.error}. Install Docker Desktop (macOS/Windows) or start the Docker Engine (Linux), then try again.`,
-    );
+    const hint =
+      health.reason === 'desktop-not-running'
+        ? 'Docker Desktop is installed, but it is not running. Open Docker Desktop and wait for it to start, then try again.'
+        : health.reason === 'engine-not-running'
+          ? 'Start the Docker service on this computer (run `sudo systemctl start docker`), then try again.'
+          : 'You need to install Docker first. Install Docker Desktop (Windows or Mac) or Docker Engine (Linux), then try again.';
+    throw new Error(`Docker is not running. ${hint} Details: ${health.error}.`);
   }
-  push('preflight', 8, 'Docker reachable', `[${ts()}] Docker ${health.version}`);
+  push('docker-check', 10, 'Docker is running', `[${ts()}] Docker ${health.version}`);
+
+  // Capture the host hardware snapshot up front so we have it ready for
+  // the post-deploy on-chain `specs:v1` publish. Probe failure is non-fatal.
+  try {
+    const specs = await captureLocalSpecs();
+    await updateNode(node.id, { specs });
+  } catch (specErr) {
+    log.warn('local spec capture failed', { id: node.id, err: (specErr as Error).message });
+  }
 
   if (isCancelled()) return;
-  push('image-build', 12, 'Preparing node image', `[${ts()}] tag=${IMAGE_TAG} (first build can take 5–15 min; cached thereafter)`);
-  await ensureImage(IMAGE_TAG, (line) => push('image-build', 36, 'Preparing node image', line));
+  const imageCached = await hasImage(IMAGE_TAG);
+  if (imageCached) {
+    push(
+      'image-build',
+      45,
+      'Node image cached',
+      `[${ts()}] ${IMAGE_TAG} already in local store — skipping build`,
+    );
+  } else {
+    push(
+      'image-build',
+      12,
+      'Preparing node image',
+      `[${ts()}] tag=${IMAGE_TAG} (first build can take 5–15 min; cached thereafter)`,
+    );
+    try {
+      await ensureImage(
+        IMAGE_TAG,
+        (line) => push('image-build', 36, 'Preparing node image', line),
+        signal,
+      );
+    } catch (buildErr) {
+      if (isCancelled() || signal.aborted) {
+        throw new Error('You cancelled the deploy while the node image was building.');
+      }
+      throw buildErr;
+    }
+  }
 
   if (isCancelled()) return;
+  // Docker Desktop sometimes restarts during a long image build (Windows
+  // updates, OOM kills, user-initiated reset). Re-probe before any further
+  // dockerode call so the user gets a precise error instead of a hang.
+  await recheckDockerDaemon();
   const dataDir = nodeDataDir(node.id);
   await fs.mkdir(dataDir, { recursive: true });
 
@@ -251,35 +567,52 @@ async function runLocalDeploy(
   //    `sentinelhub keys add --recover`. This runs in a throwaway
   //    container sharing the same host data dir; `dvpnx start` will pick
   //    up the operator key on launch.
+  //
+  // We write the mnemonic to a temp file inside the bind-mounted host
+  // dir and have a shell pipe it into sentinelhub's stdin. The previous
+  // implementation used Docker's AttachStdin, which is unreliable on
+  // Windows / Docker Desktop named pipes — the EOF would sometimes not
+  // propagate, and `--recover` would block forever waiting for input.
+  // The deploy would then sit at "Seeding node keyring" indefinitely.
+  // Reading from a file removes that whole class of failure.
   push('keygen', 55, 'Seeding node keyring', `[${ts()}] sentinelhub keys add --recover (name=operator)`);
-  const hubCmd = [
-    'sentinelhub',
-    'keys',
-    'add',
-    'operator',
-    '--keyring-backend',
-    'test',
-    '--keyring-dir',
-    '/root/.sentinel-dvpnx',
-    '--recover',
-    '--output',
-    'json',
-  ];
-  const keygen = await runOnce({
-    hostDataDir: dataDir,
-    imageTag: IMAGE_TAG,
-    // The image's ENTRYPOINT is `dvpnx`. Override it with /bin/sh so we
-    // can shell-pipe the mnemonic into `sentinelhub keys add --recover`.
-    // Without this override, Docker runs `dvpnx /bin/sh -c "..."` and
-    // dvpnx rejects `/bin/sh` as an unknown subcommand.
-    entrypoint: ['/bin/sh', '-c'],
-    // sentinelhub's `--recover` reads the mnemonic from stdin on a single line.
-    cmd: [`echo '${nodeMnemonic}' | ${hubCmd.join(' ')}`],
-    onLog: (line) => push('keygen', 62, 'Seeding node keyring', line),
-  });
+  const mnemonicFile = path.join(dataDir, '.mnemonic.tmp');
+  await fs.writeFile(mnemonicFile, `${nodeMnemonic}\n`, { mode: 0o600 });
+  // Inside the container, the host data dir is mounted at /root/.sentinel-dvpnx.
+  // We use /bin/sh -c "...; rm -f tmp" so the secret is removed before the
+  // container exits even if sentinelhub fails. Belt-and-braces: we also unlink
+  // the host-side tempfile in a `finally` below.
+  const HUB_BIN = '/usr/local/bin/sentinelhub';
+  const innerCmd =
+    `${HUB_BIN} keys add operator --keyring-backend test ` +
+    `--keyring-dir /root/.sentinel-dvpnx --recover --output json ` +
+    `< /root/.sentinel-dvpnx/.mnemonic.tmp; rc=$?; ` +
+    `rm -f /root/.sentinel-dvpnx/.mnemonic.tmp; exit $rc`;
+  let keygen: { exitCode: number; output: string };
+  try {
+    keygen = await runOnce({
+      hostDataDir: dataDir,
+      imageTag: IMAGE_TAG,
+      entrypoint: ['/bin/sh', '-c'],
+      cmd: [innerCmd],
+      onLog: (line) => push('keygen', 62, 'Seeding node keyring', line),
+      timeoutMs: 90_000,
+      signal,
+    });
+  } finally {
+    await fs.unlink(mnemonicFile).catch(() => undefined);
+  }
+  if (keygen.exitCode === -1) {
+    throw new Error('You cancelled the deploy while the node was creating its key.');
+  }
+  if (keygen.exitCode === 124) {
+    throw new Error(
+      'Creating the node key took too long (over 90 seconds). Docker Desktop is running, but the helper container did not finish. Please restart Docker Desktop and try deploying again.',
+    );
+  }
   if (keygen.exitCode !== 0) {
     throw new Error(
-      `Keyring seeding failed (sentinelhub keys add exited ${keygen.exitCode}): ${keygen.output.trim().slice(-400)}`,
+      `The node could not create its key. Details: ${keygen.output.trim().slice(-400)}`,
     );
   }
 
@@ -292,6 +625,9 @@ async function runLocalDeploy(
     serviceType: node.serviceType,
     gigabytePriceUdvpn: Math.round(req.gigabytePriceDVPN * 1_000_000),
     hourlyPriceUdvpn: Math.round(req.hourlyPriceDVPN * 1_000_000),
+    priceMode: req.priceMode ?? 'flat',
+    usdGigabytePrice: req.usdGigabytePrice,
+    usdHourlyPrice: req.usdHourlyPrice,
     remoteUrl: node.remoteUrl ?? `127.0.0.1:${node.port}`,
     keyName: 'operator',
   });
@@ -312,25 +648,82 @@ async function runLocalDeploy(
       stripToHost(node.remoteUrl ?? '127.0.0.1'),
     ],
     onLog: (line) => push('configure', 82, 'Initializing node (TLS + service)', line),
+    timeoutMs: 120_000,
+    signal,
   });
+  if (initRes.exitCode === -1) {
+    throw new Error('You cancelled the deploy while the node was setting itself up.');
+  }
+  if (initRes.exitCode === 124) {
+    throw new Error('Setting up the node took too long (over 2 minutes). Please restart Docker Desktop and try deploying again.');
+  }
   if (initRes.exitCode !== 0) {
-    throw new Error(`dvpnx init failed (exit ${initRes.exitCode}): ${initRes.output.trim().slice(-400)}`);
+    throw new Error(`The node could not finish setting itself up. Details: ${initRes.output.trim().slice(-400)}`);
   }
 
   // 4. Start the long-running container.
   if (isCancelled()) return;
-  push('starting', 90, 'Starting node container', `[${ts()}] docker run ${IMAGE_TAG}`, {
-    mnemonicForBackup: nodeMnemonic,
-    operatorAddress: node.operatorAddress,
-  });
-  await startNode(node.id);
+  await recheckDockerDaemon();
+  push('starting', 90, 'Starting node container', `[${ts()}] docker run ${IMAGE_TAG}`);
+  await withDockerTimeout(() => startNode(node.id), 120_000, 'startNode');
 
   if (isCancelled()) return;
-  push('verifying', 96, 'Waiting for first heartbeat', `[${ts()}] poller runs every 60s`, {
-    mnemonicForBackup: nodeMnemonic,
-    operatorAddress: node.operatorAddress,
-  });
-  await new Promise((r) => setTimeout(r, 3_000));
+  push('verifying', 94, 'Waiting for node container', `[${ts()}] checking container state…`);
+  // Poll the local container for proof-of-life: running + at least one log
+  // line. We give it up to ~25s before falling back to the original blind
+  // wait — this catches the most common failure mode (container exits with
+  // a config error in the first second) and surfaces it as a clear deploy
+  // error instead of a silent "node never came up" that the user would
+  // only spot from the Nodes screen 30s later.
+  const running = await getNode(node.id);
+  const runtimeId = running?.runtimeId;
+  const startedTs = Date.now();
+  const HEARTBEAT_TIMEOUT_MS = 25_000;
+  let liveSeen = false;
+  while (Date.now() - startedTs < HEARTBEAT_TIMEOUT_MS) {
+    if (isCancelled()) return;
+    if (!runtimeId) break;
+    try {
+      const up = await withDockerTimeout(() => isRunning(runtimeId), 5_000, 'isRunning');
+      if (!up) {
+        // Container exited before we could verify it — pull last logs and
+        // surface them so the user sees WHY (bad config, port in use, etc.)
+        // instead of a generic "node not online" toast a minute later.
+        const tail = (
+          await withDockerTimeout(() => containerLogs(runtimeId, 80), 8_000, 'containerLogs')
+        )
+          .join('\n')
+          .trim();
+        throw new Error(
+          `Node container exited shortly after start. Last logs:\n${tail.slice(-1200) || '(no output)'}`,
+        );
+      }
+      const recent = await withDockerTimeout(
+        () => containerLogs(runtimeId, 5),
+        5_000,
+        'containerLogs',
+      );
+      if (recent.length > 0) {
+        liveSeen = true;
+        push('verifying', 97, 'Node container is up', `[${ts()}] ${recent[recent.length - 1] ?? ''}`);
+        break;
+      }
+    } catch (err) {
+      // isRunning / containerLogs failure is non-fatal here unless we
+      // already determined the container exited (re-thrown above). For
+      // intermittent dockerode disconnects, just retry the loop.
+      if ((err as Error).message?.startsWith('Node container exited')) throw err;
+    }
+    await new Promise((r) => setTimeout(r, 1_500));
+  }
+  if (!liveSeen) {
+    push(
+      'verifying',
+      96,
+      'First heartbeat pending',
+      `[${ts()}] container is up but the chain heartbeat may take a minute — the Nodes page will flip to online when it lands.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,28 +736,94 @@ async function runRemoteDeploy(
   nodeMnemonic: string,
   push: PushFn,
   isCancelled: () => boolean,
+  signal: AbortSignal,
 ): Promise<void> {
   if (!req.ssh) throw new Error('SSH credentials required for remote deploy');
+
+  // Helper: wrap runRemote with our cancel signal + a per-step timeout, and
+  // turn well-known result codes (124 timeout, -1 cancel) into thrown errors
+  // with messages the user can act on. This mirrors the local-deploy
+  // runOnce() error handling so the renderer surfaces the same vocabulary
+  // regardless of which path the user took.
+  const ssh = (
+    client: Client,
+    label: string,
+    command: string,
+    onLog?: (l: string) => void,
+    extra: { stdin?: string; timeoutMs?: number } = {},
+  ) =>
+    runRemote(client, command, onLog, {
+      stdin: extra.stdin,
+      timeoutMs: extra.timeoutMs ?? 600_000,
+      signal,
+    }).then((res) => {
+      if (res.code === -1) {
+        throw new Error(`Deploy was cancelled while ${label}.`);
+      }
+      if (res.code === 124) {
+        throw new Error(
+          `${label} timed out after ${Math.round((extra.timeoutMs ?? 600_000) / 1000)}s on the remote host. Check connectivity and retry.`,
+        );
+      }
+      return res;
+    });
 
   push('connecting', 4, 'Opening secure shell', `[${ts()}] ${req.ssh.host}:${req.ssh.port}`);
   await withSSH(req.ssh, async (client) => {
     if (isCancelled()) return;
     push('preflight', 10, 'Checking remote host', `[${ts()}] uname + whoami + docker probe`);
-    const uname = await runRemote(client, 'uname -a', (l) => push('preflight', 12, 'Checking remote host', l));
+    const uname = await ssh(client, 'checking remote host', 'uname -a', (l) => push('preflight', 12, 'Checking remote host', l), { timeoutMs: 30_000 });
     if (uname.code !== 0) throw new Error(`uname failed: ${uname.stderr.trim()}`);
 
-    const idRes = await runRemote(client, 'id -u');
+    // Capture remote hardware snapshot for the post-deploy on-chain
+    // `specs:v1` publish. Probe failure is non-fatal — deploy continues
+    // and specs publishing is simply skipped.
+    try {
+      const cores = await ssh(client, 'probing remote cores', 'nproc', undefined, { timeoutMs: 10_000 });
+      const memInfo = await ssh(client, 'probing remote memory', 'cat /proc/meminfo', undefined, { timeoutMs: 10_000 });
+      const cpuInfo = await ssh(client, 'probing remote cpu', 'cat /proc/cpuinfo', undefined, { timeoutMs: 10_000 });
+      const c = parseInt(cores.stdout.trim(), 10);
+      const memTotalKb = memInfo.stdout.match(/^MemTotal:\s+(\d+)\s*kB/m);
+      const cpuModel = cpuInfo.stdout.match(/^model name\s*:\s*(.+)$/m);
+      if (Number.isFinite(c) && c > 0 && memTotalKb) {
+        const r = Math.round(parseInt(memTotalKb[1], 10) / 1024);
+        const cpu = (cpuModel?.[1] ?? 'Unknown CPU').replace(/\s+/g, ' ').trim().slice(0, 64);
+        await updateNode(node.id, { specs: { cpu, c, cr: c, r, rr: r } });
+      } else {
+        log.warn('remote spec probe returned unexpected output', { id: node.id });
+      }
+    } catch (specErr) {
+      log.warn('remote spec capture failed', { id: node.id, err: (specErr as Error).message });
+    }
+
+    const idRes = await ssh(client, 'checking remote host', 'id -u', undefined, { timeoutMs: 15_000 });
     const isRoot = idRes.stdout.trim() === '0';
     const sudo = isRoot ? '' : 'sudo -n ';
     push('preflight', 14, 'Checking remote host', `[${ts()}] uid=${idRes.stdout.trim()} sudo=${sudo ? 'yes' : 'no'}`);
 
-    const dockerProbe = await runRemote(client, 'docker --version 2>/dev/null || true');
+    // Fail fast if a non-root user can't get passwordless sudo. Without
+    // this preflight, every downstream `${sudo}…` step fails opaquely
+    // and the user sees only the inner command's stderr.
+    if (!isRoot) {
+      const sudoProbe = await ssh(client, 'probing sudo', 'sudo -n true 2>&1', undefined, { timeoutMs: 15_000 });
+      if (sudoProbe.code !== 0) {
+        throw new Error(
+          'Passwordless sudo is required for non-root deploys. ' +
+          'Configure NOPASSWD sudo for this user (e.g. via /etc/sudoers.d) ' +
+          'or deploy as root, then retry.',
+        );
+      }
+    }
+
+    const dockerProbe = await ssh(client, 'probing remote docker', 'docker --version 2>/dev/null || true', undefined, { timeoutMs: 15_000 });
     if (!/Docker version/i.test(dockerProbe.stdout)) {
       push('preflight', 22, 'Installing Docker', `[${ts()}] curl get.docker.com | sh`);
-      const install = await runRemote(
+      const install = await ssh(
         client,
+        'installing Docker',
         `curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && ${sudo}sh /tmp/get-docker.sh`,
         (l) => push('preflight', 28, 'Installing Docker', l),
+        { timeoutMs: 600_000 },
       );
       if (install.code !== 0) {
         throw new Error(
@@ -374,20 +833,34 @@ async function runRemoteDeploy(
     }
 
     // Data-dir selection: root uses /root/.sentinel-dvpnx/<id>; non-root uses $HOME.
+    // node.id is a UUIDv4 from crypto.randomUUID() but defence-in-depth: refuse
+    // to interpolate anything that would let a malicious id escape the path.
+    const NODE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!NODE_ID_RE.test(node.id)) {
+      throw new Error('refusing remote deploy for non-UUID node id');
+    }
+    // The id is a known-safe token (regex-validated). The remaining literal
+    // segment is also static. We deliberately do NOT shell-quote dataHost
+    // wholesale because we need $HOME to expand on the remote shell.
     const dataHost = isRoot
       ? `/root/.sentinel-dvpnx/${node.id}`
       : `$HOME/.sentinel-dvpnx/${node.id}`;
-    await runRemote(client, `mkdir -p ${dataHost}`);
+    await ssh(client, 'creating remote data dir', `mkdir -p "${dataHost}"`, undefined, { timeoutMs: 15_000 });
 
     // 1. Build the image on the remote if missing. First build takes 10–15
     //    minutes (go compile of sentinel-dvpnx + sentinelhub + wasmvm).
     if (isCancelled()) return;
     push('image-build', 36, 'Building node image on remote', `[${ts()}] ${IMAGE_TAG} — first build: 10–15 min`);
     const buildCmd = `${sudo}docker image inspect ${shellQuote([IMAGE_TAG])} >/dev/null 2>&1 || ${sudo}docker build -t ${shellQuote([IMAGE_TAG])} --build-arg SENTINEL_DVPNX_VERSION=${shellQuote([IMAGE_VERSION])} - <<'EOF'\n${readBundledDockerfile()}\nEOF`;
-    const buildRes = await runRemote(
+    // Generous build window — first build is a Go compile of sentinel-dvpnx
+    // + sentinelhub + a wasmvm download. 30 minutes covers slow VPSes and
+    // mid-build container registry hiccups; cached rebuilds finish in <1s.
+    const buildRes = await ssh(
       client,
+      'building Docker image',
       buildCmd,
       (l) => push('image-build', 48, 'Building node image on remote', l),
+      { timeoutMs: 30 * 60_000 },
     );
     if (buildRes.code !== 0) {
       throw new Error(
@@ -396,13 +869,28 @@ async function runRemoteDeploy(
     }
 
     // Expand $HOME for consistent absolute paths in SFTP + docker -v.
-    const expand = await runRemote(client, `echo ${dataHost}`);
-    const absDataHost = expand.stdout.trim() || dataHost.replace('$HOME', '/root');
+    // Use `printf %s` (not echo) so the shell only performs variable
+    // expansion — no backslash interpretation, no globbing — and validate
+    // the result against an absolute-path regex before using it downstream.
+    const expand = await ssh(client, 'resolving remote data dir', `printf %s "${dataHost}"`, undefined, { timeoutMs: 15_000 });
+    const expanded = expand.stdout.trim();
+    const ABS_PATH_RE = /^\/[a-zA-Z0-9_./\-]+$/;
+    const absDataHost = ABS_PATH_RE.test(expanded)
+      ? expanded
+      : dataHost.replace('$HOME', '/root');
+    if (!ABS_PATH_RE.test(absDataHost) || absDataHost.includes('..')) {
+      throw new Error(`refusing to use unsafe remote data path: ${absDataHost}`);
+    }
 
     // 2. Seed the node's keyring with our app-generated mnemonic via
     //    sentinelhub keys add --recover (throwaway container).
     if (isCancelled()) return;
     push('keygen', 54, 'Seeding node keyring', `[${ts()}] sentinelhub keys add --recover`);
+    // Pass the mnemonic via the SSH channel's stdin (then through
+    // `docker run -i`'s stdin, then to `sentinelhub --recover`'s stdin)
+    // instead of interpolating it into a shell `echo '...' | …` pipeline.
+    // This keeps the secret out of the remote `ps` table, off the SSH
+    // server's command log, and immune to quote-bearing input.
     const hubInner = [
       'docker',
       'run',
@@ -411,14 +899,26 @@ async function runRemoteDeploy(
       '-v',
       `${absDataHost}:/root/.sentinel-dvpnx`,
       '--entrypoint',
-      '/bin/sh',
+      'sentinelhub',
       IMAGE_TAG,
-      '-c',
-      `echo '${nodeMnemonic}' | sentinelhub keys add operator --keyring-backend test --keyring-dir /root/.sentinel-dvpnx --recover --output json`,
+      'keys',
+      'add',
+      'operator',
+      '--keyring-backend',
+      'test',
+      '--keyring-dir',
+      '/root/.sentinel-dvpnx',
+      '--recover',
+      '--output',
+      'json',
     ];
     const hubCmd = (sudo ? sudo : '') + shellQuote(hubInner);
-    const keygen = await runRemote(client, hubCmd, (l) =>
-      push('keygen', 62, 'Seeding node keyring', l),
+    const keygen = await ssh(
+      client,
+      'seeding node keyring',
+      hubCmd,
+      (l) => push('keygen', 62, 'Seeding node keyring', l),
+      { stdin: `${nodeMnemonic}\n`, timeoutMs: 90_000 },
     );
     if (keygen.code !== 0) {
       throw new Error(
@@ -435,6 +935,9 @@ async function runRemoteDeploy(
       serviceType: node.serviceType,
       gigabytePriceUdvpn: Math.round(req.gigabytePriceDVPN * 1_000_000),
       hourlyPriceUdvpn: Math.round(req.hourlyPriceDVPN * 1_000_000),
+      priceMode: req.priceMode ?? 'flat',
+      usdGigabytePrice: req.usdGigabytePrice,
+      usdHourlyPrice: req.usdHourlyPrice,
       remoteUrl: node.remoteUrl ?? `${req.ssh!.host}:${node.port}`,
       keyName: 'operator',
     });
@@ -461,8 +964,12 @@ async function runRemoteDeploy(
       stripToHost(node.remoteUrl ?? req.ssh!.host),
     ];
     const initCmd = (sudo ? sudo : '') + shellQuote(initInner);
-    const init = await runRemote(client, initCmd, (l) =>
-      push('configure', 82, 'Initializing node (TLS + service)', l),
+    const init = await ssh(
+      client,
+      'initializing node',
+      initCmd,
+      (l) => push('configure', 82, 'Initializing node (TLS + service)', l),
+      { timeoutMs: 120_000 },
     );
     if (init.code !== 0) {
       throw new Error(
@@ -497,7 +1004,13 @@ async function runRemoteDeploy(
       'start',
     ];
     const runCmd = (sudo ? sudo : '') + shellQuote(runInner);
-    const run = await runRemote(client, runCmd, (l) => push('starting', 92, 'Starting node container on remote', l));
+    const run = await ssh(
+      client,
+      'starting node container',
+      runCmd,
+      (l) => push('starting', 92, 'Starting node container on remote', l),
+      { timeoutMs: 60_000 },
+    );
     if (run.code !== 0) {
       throw new Error(`docker run failed: ${run.stderr.trim().slice(-400)}`);
     }
@@ -512,10 +1025,7 @@ async function runRemoteDeploy(
       }
     }
 
-    push('verifying', 96, 'Waiting for first heartbeat', `[${ts()}] poller runs every 60s`, {
-      mnemonicForBackup: nodeMnemonic,
-      operatorAddress: node.operatorAddress,
-    });
+    push('verifying', 96, 'Waiting for first heartbeat', `[${ts()}] poller runs every 60s`);
   });
 }
 
@@ -527,8 +1037,14 @@ interface ConfigShape {
   moniker: string;
   port: number;
   serviceType: 'wireguard' | 'v2ray';
+  /** udvpn fallback (oracle mode) OR literal udvpn price (flat mode). */
   gigabytePriceUdvpn: number;
   hourlyPriceUdvpn: number;
+  /** Defaults to 'flat' if omitted — preserves current behaviour. */
+  priceMode?: 'flat' | 'oracle';
+  /** Required when priceMode === 'oracle'. */
+  usdGigabytePrice?: number;
+  usdHourlyPrice?: number;
   remoteUrl: string;
   keyName: string;
 }
@@ -573,12 +1089,36 @@ function buildConfigTomlString(cfg: ConfigShape): string {
     handshake_dns: { enable: false, peers: 8 },
     node: {
       api_port: String(cfg.port),
-      // Price format is `denom:BASE,QUOTE`. BASE is a LegacyDec (fiat rate
-      // used by the on-chain oracle); QUOTE is a plain udvpn integer. We
-      // set BASE=0 so the oracle is disabled and the node quotes a flat
-      // udvpn price only — matches what the UI exposes.
-      gigabyte_prices: `${DENOM}:0,${cfg.gigabytePriceUdvpn}`,
-      hourly_prices: `${DENOM}:0,${cfg.hourlyPriceUdvpn}`,
+      // Price entries serialized via formatPrices() — multi-denom would
+      // need `;` (NOT `,`) and alphabetical denom ordering.
+      //
+      // Flat mode  → BASE=0, oracle disabled, node quotes the literal udvpn.
+      // Oracle mode → BASE=USD target (LegacyDec), QUOTE=udvpn fallback used
+      //   only when the on-chain Osmosis TWAP is unreachable.
+      gigabyte_prices:
+        cfg.priceMode === 'oracle'
+          ? formatPrices([
+              {
+                denom: DENOM,
+                base: cfg.usdGigabytePrice ?? 0,
+                quote: cfg.gigabytePriceUdvpn,
+              },
+            ])
+          : formatPrices([
+              { denom: DENOM, base: '0', quote: cfg.gigabytePriceUdvpn },
+            ]),
+      hourly_prices:
+        cfg.priceMode === 'oracle'
+          ? formatPrices([
+              {
+                denom: DENOM,
+                base: cfg.usdHourlyPrice ?? 0,
+                quote: cfg.hourlyPriceUdvpn,
+              },
+            ])
+          : formatPrices([
+              { denom: DENOM, base: '0', quote: cfg.hourlyPriceUdvpn },
+            ]),
       interval_best_rpc_addr: '5m0s',
       interval_geoip_location: '6h0m0s',
       interval_prices_update: '6h0m0s',
@@ -682,4 +1222,23 @@ export function stripToHost(raw: string): string {
 function ts(): string {
   const d = new Date();
   return d.toISOString().split('T')[1]!.replace('Z', '');
+}
+
+// Final scrubber for anything we hand to the renderer. Belts-and-braces:
+// strips ANSI/CSI escapes (with or without the leading ESC byte — sentinel-dvpnx
+// emits zerolog's coloured logfmt and some pipelines drop the ESC), docker
+// stream-multiplex frame headers that occasionally survive when an upstream
+// command wasn't passed through stripDockerFrames, and trailing whitespace.
+const ANSI_WITH_ESC = /\x1B\[[0-?]*[ -/]*[@-~]|\x9B[0-?]*[ -/]*[@-~]/g;
+// Same SGR codes but with the ESC byte already lost (e.g. through a writer
+// that drops control bytes). We restrict to the SGR final byte `m` so we
+// don't accidentally eat legitimate `[42]` style content.
+const ANSI_WITHOUT_ESC = /\[\d{1,3}(?:;\d{1,3})*m/g;
+function scrubLog(s: string | undefined): string {
+  if (!s) return '';
+  return s
+    .replace(ANSI_WITH_ESC, '')
+    .replace(ANSI_WITHOUT_ESC, '')
+    .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, '')
+    .trimEnd();
 }

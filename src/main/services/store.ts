@@ -61,9 +61,27 @@ export async function readStore(): Promise<StoreShape> {
   return cached;
 }
 
+/** Drop the in-memory cache so the next `readStore()` reads from disk
+ *  (or falls back to defaults if the file is gone). Used by full-reset
+ *  flows like wallet logout. */
+export function resetStoreCache(): void {
+  cached = null;
+}
+
 export async function writeStore(next: StoreShape): Promise<void> {
   cached = next;
-  const dir = path.dirname(storePath());
+  const target = storePath();
+  const dir = path.dirname(target);
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(storePath(), JSON.stringify(next, null, 2), 'utf8');
+  // Atomic write: serialize to a sibling temp file first, then rename. A
+  // crash mid-write therefore cannot leave `store.json` truncated — the
+  // previous good copy stays intact until the rename completes.
+  const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(next, null, 2), 'utf8');
+  try {
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }

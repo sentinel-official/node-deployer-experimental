@@ -6,3 +6,17 @@ release/
 .env
 .env.local
 *.log
+*.tsbuildinfo
+build-ctx/
+
+# Tester-only — never commit
+scripts/
+findings/
+design-exports/
+vendor-clone/
+CLAUDE.md
+memory/
+
+# E2E run artifacts
+tests/e2e/last-run.log
+tests/e2e/last-report.json

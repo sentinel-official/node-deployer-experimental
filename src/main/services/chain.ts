@@ -16,14 +16,27 @@ export const DEFAULT_GAS_PRICE_UDVPN = '0.1';
 
 /**
  * Public RPC pool. The app picks whichever endpoint answers fastest and
- * falls through on failure. These are the three endpoints named by the
- * Sentinel docs + two community validators (AutoStake + Polkachu) with
- * historically strong uptime.
+ * falls through on failure.
+ *
+ * Synced with blue-js-sdk@2.7.1 RPC_ENDPOINTS (defaults.js, verified
+ * 2026-05-02 by `audit-rpc-endpoints.mjs`). Notably excludes
+ * `rpc.sentinel.co` — on 2026-05-02 it was ~22k blocks behind tip and
+ * returning 0 for funded addresses while reporting `catching_up=false`,
+ * which silently breaks balance and node-status queries.
  */
 export const DEFAULT_RPC_POOL: readonly string[] = [
-  'https://rpc.sentinel.co:443',
-  'https://sentinel-mainnet-rpc.autostake.com:443',
-  'https://sentinel-rpc.polkachu.com:443',
+  'https://rpc-sentinel.busurnode.com',
+  'https://rpc.trinitystake.io',
+  'https://sentinel-rpc.publicnode.com',
+  'https://sentinel-rpc.polkachu.com',
+  'https://rpc.mathnodes.com',
+  'https://rpc.dvpn.roomit.xyz',
+  'https://rpc.sentinel.suchnode.net',
+  'https://rpc.sentinel.chaintools.tech',
+  'https://rpc.sentinel.validatus.com',
+  'https://rpc.sentinel.quokkastake.io',
+  'https://rpc.sentineldao.com',
+  'https://rpc-sentinel.chainvibes.com',
 ];
 
 export const udvpnToDvpn = (u: string | number | bigint): number => {

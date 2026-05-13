@@ -1,4 +1,4 @@
-# Sentinel dVPN — Desktop
+# Sentinel Node Manager
 
 Cross-platform Electron app that deploys and operates
 [Sentinel dVPN](https://sentinel.co) nodes — locally on the user's machine
@@ -68,10 +68,26 @@ background. The Help screen shows status and can install on demand.
 
 ## For developers
 
+### Toolchain prerequisites
+
+| Requirement | Version | Notes |
+|---|---|---|
+| Node.js | 20.10+ (LTS) | `engines.node` enforces. `.nvmrc` pins 20 — `nvm use` picks it up. |
+| npm | 10+ | Ships with Node 20. |
+| Python | 3.8+ | `node-gyp` requires it for native module rebuilds. |
+| C/C++ toolchain | platform-specific | Required to compile `better-sqlite3`, `secp256k1`, `cpu-features` against the Electron ABI. |
+
+**Per-OS native-build deps:**
+
+- **Windows**: Visual Studio Build Tools 2022 with the *Desktop development with C++* workload (`winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --quiet --wait --norestart --includeRecommended"`). Reboot after install.
+- **macOS**: Xcode Command Line Tools (`xcode-select --install`).
+- **Linux**: `sudo apt install build-essential python3 libsecret-1-dev` (Debian / Ubuntu) — `libsecret` is needed by Electron's `safeStorage` keyring backend.
+
+### Run
+
 ```bash
 npm install
-npm run rebuild:node    # rebuild better-sqlite3 against system Node for tests
-npm run dev             # Electron + Vite, with HMR and Docker-aware deploy flow
+npm run dev             # Electron + Vite, HMR, Docker-aware deploy flow
 npm run typecheck       # tsc --noEmit on main + renderer
 npm run test            # vitest: 25 unit + component smoke tests
 
@@ -80,10 +96,31 @@ npm run package:win
 npm run package:linux
 ```
 
-Note: `predev` runs `electron-builder install-app-deps` which rebuilds
-native modules (`better-sqlite3`, `secp256k1`, `cpu-features`) against the
-Electron ABI. If you later want to run unit tests, run
-`npm run rebuild:node` to rebuild for the system Node ABI.
+`npm install` triggers `predev` → `electron-builder install-app-deps`, which
+rebuilds native modules (`better-sqlite3`, `secp256k1`, `cpu-features`)
+against the Electron ABI used by `npm run dev`.
+
+If you ran `npm run test` (which uses system Node) and then want to go back
+to `npm run dev` (Electron), run `npm run rebuild:electron` to flip the ABI
+back. The reverse — Electron → Node — is `npm run rebuild:node`.
+
+### End-to-end CLI test (real money)
+
+`tests/e2e/cli-e2e.mjs` drives every CLI command end-to-end against
+mainnet — including a real-money self-send and a real `MsgUpdateNodeDetails`
+broadcast — and verifies each tx on-chain via Sentinel RPC `tx_search`.
+
+```bash
+node tests/e2e/cli-e2e.mjs              # full real-money flow (≤ 0.0015 DVPN total)
+node tests/e2e/cli-e2e.mjs --dry-run    # everything except the two TXs
+node tests/e2e/cli-e2e.mjs --no-deploy  # skip Docker keygen + node lifecycle
+```
+
+Prereqs: app running, CLI server started (in-app CLI screen → **Start**, or
+launch with `SNM_AUTO_START_CLI=1` + the explicit ack token), wallet
+funded with ≥ 0.5 DVPN. See [`docs/e2e-cli-test.md`](./docs/e2e-cli-test.md)
+for the full protocol, on-chain verification details, troubleshooting
+table, and safety knobs.
 
 ### What's real
 
@@ -94,7 +131,7 @@ Electron ABI. If you later want to run unit tests, run
 | Address format | bech32; app + nodes use the `sent` HRP, chain-side node identity is `sentnode` |
 | At-rest encryption | Electron `safeStorage` (OS keychain: Keychain / DPAPI / libsecret) |
 | Balance query | `StargateClient.getBalance(addr, 'udvpn')` |
-| RPC pool | Three endpoints (rpc.sentinel.co + AutoStake + Polkachu) with latency-aware failover |
+| RPC pool | Four endpoints (rpc.sentinel.co + AutoStake + Polkachu + SuchNode) with latency-aware failover |
 | Send / MsgSend | `SigningSentinelClient.sendTokens` with explicit StdFee; error codes classified |
 | Operator seeding | 1 DVPN auto-transferred to each new node's operator address on deploy |
 | QR code | Real SVG from `qrcode` in main, inlined in renderer |

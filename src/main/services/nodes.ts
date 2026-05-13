@@ -18,10 +18,16 @@ export const nodeHistory = (id: string, window: MetricsWindow): MetricsSample[] 
   manager.historyFor(id, window);
 export const withdrawFromNode = (id: string, to: string, amount?: number) =>
   manager.withdrawFromNode(id, to, amount);
+export const reapStuckNow = () => manager.reapStuckNow();
 export const updateNodePricing = (
   id: string,
   gigabytePriceDVPN: number,
   hourlyPriceDVPN: number,
-) => manager.updateNodePricing(id, gigabytePriceDVPN, hourlyPriceDVPN);
+  opts: {
+    priceMode?: 'flat' | 'oracle';
+    usdGigabytePrice?: number;
+    usdHourlyPrice?: number;
+  } = {},
+) => manager.updateNodePricing(id, gigabytePriceDVPN, hourlyPriceDVPN, opts);
 
 export type { DeployedNode, NodeLiveStatus };

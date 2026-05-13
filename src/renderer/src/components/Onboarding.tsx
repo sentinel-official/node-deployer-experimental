@@ -3,7 +3,7 @@ import { useApp } from '../store/app';
 import { MIcon } from './MIcon';
 
 /**
- * First-run onboarding overlay. 3 slides. Can be dismissed at any point.
+ * First-run onboarding overlay. 4 slides. Can be dismissed at any point.
  * Persisted via `settings.seenOnboarding`.
  */
 export function Onboarding() {
@@ -19,8 +19,8 @@ export function Onboarding() {
   const slides = [
     {
       icon: 'vpn_key',
-      title: 'Welcome to Sentinel dVPN',
-      body: 'Deploy and operate decentralized VPN nodes on the Sentinel network. Earn $P2P for the bandwidth you serve — all settlement happens on chain.',
+      title: 'Welcome to Sentinel Node Manager',
+      body: 'Deploy and operate decentralized VPN nodes on the Sentinel network. Earn $P2P for the bandwidth you serve, with all settlement happening on chain.',
     },
     {
       icon: 'dns',
@@ -30,7 +30,12 @@ export function Onboarding() {
     {
       icon: 'account_balance_wallet',
       title: 'One wallet, many nodes',
-      body: 'Your in-app wallet holds $P2P for gas and collected rewards. Each node owns its own operator key — withdraw rewards to your app wallet in one click.',
+      body: 'Your in-app wallet holds $P2P for gas and collected rewards. Each node owns its own operator key, and you can withdraw rewards to your app wallet in one click.',
+    },
+    {
+      icon: 'savings',
+      title: 'Fund your wallet first: about 10 $P2P',
+      body: "Each node registration costs gas on chain. We recommend keeping ~10 $P2P in your app wallet before you deploy. The Wallet page shows your address and a QR code, so you can send $P2P from any Sentinel-compatible wallet to receive.",
     },
   ] as const;
 

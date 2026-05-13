@@ -1,5 +1,5 @@
-appId: com.sentinel.dvpn.app
-productName: Sentinel dVPN
+appId: com.sentinel.nodemanager
+productName: Sentinel Node Manager
 
 # Auto-updater publish channel. Pushing a tag + uploading artifacts to a
 # GitHub release at `sentinel-official/node-deployer-experimental` is all
@@ -44,7 +44,7 @@ dmg:
   writeUpdateInfo: false
 
 win:
-  icon: build/icon.png
+  icon: build/icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -56,12 +56,12 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  shortcutName: Sentinel dVPN
+  shortcutName: Sentinel Node Manager
 
 linux:
   icon: build/icon.png
   category: Network
-  maintainer: Sentinel dVPN <noreply@sentinel.co>
+  maintainer: Sentinel Node Manager <noreply@sentinel.co>
   target:
     - target: AppImage
       arch: [x64]
